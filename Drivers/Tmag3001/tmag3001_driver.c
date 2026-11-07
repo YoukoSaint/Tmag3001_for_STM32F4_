@@ -24,13 +24,19 @@ HAL_StatusTypeDef TMAG3001_ReadRegister(TMAG3001_Handle_t *dev, uint8_t reg, uin
     return read_multiple(dev, reg, data, 1U);
 }
 
+static HAL_StatusTypeDef write_register(TMAG3001_Handle_t *dev, uint8_t reg, uint8_t data)
+{
+    if (!valid_device(dev)) return HAL_ERROR;
+    return HAL_I2C_Mem_Write(dev->hi2c, (uint16_t)(dev->i2c_addr << 1), reg,
+                             I2C_MEMADD_SIZE_8BIT, &data, 1U, TMAG3001_TIMEOUT_MS);
+}
+
 HAL_StatusTypeDef TMAG3001_WriteRegister(TMAG3001_Handle_t *dev, uint8_t reg, uint8_t data)
 {
     if (!valid_device(dev)) return HAL_ERROR;
-    /* Public raw writes can change configuration behind the acquisition cache. */
-    if (reg <= TMAG3001_REG_I2C_ADDRESS) dev->config_valid = 0U;
-    return HAL_I2C_Mem_Write(dev->hi2c, (uint16_t)(dev->i2c_addr << 1), reg,
-                             I2C_MEMADD_SIZE_8BIT, &data, 1U, TMAG3001_TIMEOUT_MS);
+    /* Bit 7 triggers conversion; bits 6:0 still select the written register. */
+    if ((reg & 0x7fU) <= TMAG3001_REG_I2C_ADDRESS) dev->config_valid = 0U;
+    return write_register(dev, reg, data);
 }
 
 HAL_StatusTypeDef TMAG3001_InitAtAddress(TMAG3001_Handle_t *dev,
@@ -125,8 +131,9 @@ HAL_StatusTypeDef TMAG3001_TriggerConversion(TMAG3001_Handle_t *dev)
 {
     if (!valid_device(dev) || !dev->config_valid) return HAL_ERROR;
     /* T is control-byte bit 7, not DEVICE_CONFIG_2 operating-mode data. */
-    return TMAG3001_WriteRegister(dev, 0x80U | TMAG3001_REG_DEVICE_CONFIG_1,
-                                 dev->device_config_1);
+    /* Writing the verified cached byte preserves the acquisition configuration. */
+    return write_register(dev, 0x80U | TMAG3001_REG_DEVICE_CONFIG_1,
+                          dev->device_config_1);
 }
 
 static int16_t signed_be(const uint8_t *bytes)

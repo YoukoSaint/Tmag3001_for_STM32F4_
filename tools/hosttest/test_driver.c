@@ -51,6 +51,44 @@ static void test_configuration(void) {
     c=config(); c.channels=(TMAG3001_ChannelEnable)0x71; CHECK(TMAG3001_ConfigureForAcq(&d,&c)==HAL_ERROR);
     c=config(); c.enable_int=2; CHECK(TMAG3001_ConfigureForAcq(&d,&c)==HAL_ERROR); reset();
 }
+static void test_public_write_invalidation(void) {
+    TMAG3001_Handle_t d=handle(); TMAG3001_Config_t c=config();
+    const unsigned aliases[]={0x83,0x80};
+    const unsigned changed[]={0x83,12};
+    for(unsigned i=0;i<2;i++) {
+        queue_config(0,0,1,-1,HAL_OK);
+        CHECK(TMAG3001_ConfigureForAcq(&d,&c)==HAL_OK); reset();
+        byte(1,0x68,aliases[i],changed[i],HAL_OK);
+        CHECK(TMAG3001_WriteRegister(&d,(uint8_t)aliases[i],(uint8_t)changed[i])==HAL_OK);
+        CHECK(!d.config_valid);
+        CHECK(TMAG3001_TriggerConversion(&d)==HAL_ERROR); reset();
+    }
+    c.avg=TMAG3001_AVG_8X;
+    queue_config(3,0,1,-1,HAL_OK);
+    CHECK(TMAG3001_ConfigureForAcq(&d,&c)==HAL_OK); reset();
+    for(unsigned i=0;i<3;i++) {
+        byte(1,0x68,0x80,12,HAL_OK);
+        CHECK(TMAG3001_TriggerConversion(&d)==HAL_OK);
+        CHECK(d.config_valid); CHECK(d.device_config_1==12); reset();
+    }
+    /* Both forms of every configuration pointer invalidate, even on failure. */
+    for(unsigned reg=0;reg<=0x0c;reg++) {
+        for(unsigned trigger=0;trigger<=0x80;trigger+=0x80) {
+            d.config_valid=1;
+            byte(1,0x68,reg|trigger,0,HAL_TIMEOUT);
+            CHECK(TMAG3001_WriteRegister(&d,(uint8_t)(reg|trigger),0)==HAL_TIMEOUT);
+            CHECK(!d.config_valid);
+            CHECK(TMAG3001_TriggerConversion(&d)==HAL_ERROR); reset();
+        }
+    }
+    /* Status writes, including their trigger aliases, do not change the cache. */
+    for(unsigned trigger=0;trigger<=0x80;trigger+=0x80) {
+        d.config_valid=1;
+        byte(1,0x68,0x1c|trigger,1,HAL_OK);
+        CHECK(TMAG3001_WriteRegister(&d,(uint8_t)(0x1c|trigger),1)==HAL_OK);
+        CHECK(d.config_valid); reset();
+    }
+}
 static void test_samples(void) {
     TMAG3001_Handle_t d=handle(); d.config_valid=1; TMAG3001_Data_t out; memset(&out,0x5a,sizeof out);
     const uint8_t b[]={0x12,0x34,0x80,0,0xff,0xff,0x7f,0xff,0xa7}; expect(0,0x68,0x10,b,9,HAL_OK); CHECK(TMAG3001_ReadSample(&d,&out)==HAL_OK); CHECK(out.x_raw==-32768); CHECK(out.y_raw==-1); CHECK(out.z_raw==32767); CHECK(out.temp_raw==0x1234); CHECK(out.conv_status==0xa7); CHECK(fabsf(out.x_mT-(-32768.0f/885))<0.00001f); CHECK(fabsf(out.y_mT-(-1.0f/885))<0.00001f); CHECK(fabsf(out.z_mT-(32767.0f/885))<0.00001f); CHECK(fabsf(out.temperature_C-((4660.0f-17512)/58.2f+25))<0.0001f); reset();
@@ -97,4 +135,4 @@ static void test_legacy_and_transport(void) {
     d.range=(TMAG3001_MagneticRange)2; CHECK(TMAG3001_ReadSample(&d,&out)==HAL_ERROR);
     CHECK(TMAG3001_ReadMagData(&d,&out)==HAL_ERROR); reset();
 }
-int main(void) { test_legacy_and_transport(); test_init(); test_configuration(); test_samples(); test_nulls(); printf("Driver: %u checks passed\n",checks); return 0; }
+int main(void) { test_legacy_and_transport(); test_init(); test_configuration(); test_public_write_invalidation(); test_samples(); test_nulls(); printf("Driver: %u checks passed\n",checks); return 0; }
