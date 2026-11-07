@@ -62,6 +62,8 @@ cmake --preset Release -DSTM32CUBE_F4_PATH="$env:STM32CUBE_F4_PATH"
 
 ## 桌面端使用（由用户主动启动）
 
+本机可直接双击根目录 `启动上位机.bat`，使用现有Anaconda Python打开界面；选择COM9、115200后连接。启动失败会保留控制台错误提示。移动到其他电脑时，可修改BAT中的VIEWER_PYTHON路径。
+
 ```powershell
 & $python host/run.py
 ```
