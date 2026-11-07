@@ -99,7 +99,12 @@ HAL_StatusTypeDef TMAG3001_InitAtAddress(TMAG3001_Handle_t *d,I2C_HandleTypeDef 
 HAL_StatusTypeDef TMAG3001_ConfigureForAcq(TMAG3001_Handle_t *d,const TMAG3001_Config_t *c)
 {
     CHECK(c->range==TMAG3001_RANGE_40mT && c->mode==TMAG3001_MODE_STANDBY &&
-          c->avg==TMAG3001_AVG_1X && c->channels==TMAG3001_CH_XYZ && c->enable_int==1,"verified acquisition config");
+          c->avg==TMAG3001_AVG_1X && c->channels==TMAG3001_CH_XYZ,"verified acquisition config");
+#ifdef APP_POLL_TEST
+    CHECK(c->enable_int==0,"polling disables sensor INT output before diagnostic recovery");
+#else
+    CHECK(c->enable_int==1,"interrupt acquisition enables sensor INT output");
+#endif
     d->config_valid=(config_result==HAL_OK);
     return config_result;
 }
@@ -173,6 +178,7 @@ static void reset(int sensor_present)
 }
 static void boot(void) { App_Init(&uart,&i2c);drain(); }
 static void step(uint32_t ms) { tick+=ms;process();drain(); }
+#ifndef APP_POLL_TEST
 static void sample_irq(void) { step(APP_SAMPLE_PERIOD_MS);App_OnSensorInt();process();drain(); }
 static void test_historical_int_recovery(void)
 {
@@ -388,3 +394,4 @@ int main(void)
     for(unsigned i=0;i<frame_count;i++) CHECK_EQ_U8(tmag_crc8(frames[i]+2,9),frames[i][11]);
     TEST_REPORT();
 }
+#endif

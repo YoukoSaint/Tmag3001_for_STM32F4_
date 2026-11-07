@@ -11,6 +11,9 @@ static tmag_status_t health;
 static uint8_t seq;
 static volatile uint8_t armed, irq_pending;
 static uint32_t armed_at, nominal_at, retry_at, heartbeat_at;
+#if !APP_USE_INT
+static uint32_t poll_at;
+#endif
 static uint8_t last_flags;
 static uint8_t int_recovery_attempted;
 static uint8_t ring[APP_TX_RING_SIZE][TMAG_PROTO_FRAME_SIZE];
@@ -178,7 +181,7 @@ static void connect_sensor(void)
     const TMAG3001_Config_t config = {
         .range = APP_RANGE_CODE == 0U ? TMAG3001_RANGE_40mT : TMAG3001_RANGE_80mT,
         .mode = TMAG3001_MODE_STANDBY, .avg = TMAG3001_AVG_1X,
-        .channels = TMAG3001_CH_XYZ, .enable_int = 1U
+        .channels = TMAG3001_CH_XYZ, .enable_int = APP_USE_INT
     };
     for (addr = APP_I2C_FIRST_ADDRESS; addr <= APP_I2C_LAST_ADDRESS; ++addr) {
         result = HAL_I2C_IsDeviceReady(sensor_i2c, (uint16_t)addr << 1, 1U, APP_I2C_TIMEOUT_MS);
@@ -264,7 +267,9 @@ void App_Init(UART_HandleTypeDef *uart, I2C_HandleTypeDef *i2c)
 }
 void App_OnSensorInt(void)
 {
+#if APP_USE_INT
     if (armed) irq_pending = 1U;
+#endif
 }
 void App_Process(void)
 {
@@ -286,6 +291,7 @@ void App_Process(void)
         if ((uint32_t)(now - retry_at) >= APP_RETRY_MS) connect_sensor();
     } else {
         if (armed) {
+#if APP_USE_INT
             if (irq_pending) collect_sample(1U);
             else if ((uint32_t)(now - armed_at) >= APP_INT_TIMEOUT_MS) {
                 HAL_StatusTypeDef result;
@@ -299,6 +305,22 @@ void App_Process(void)
                                 TMAG3001_REG_CONV_STATUS);
                 }
             }
+#else
+            if ((uint32_t)(now - poll_at) >= APP_CONV_POLL_INTERVAL_MS ||
+                (uint32_t)(now - armed_at) >= APP_CONV_TIMEOUT_MS) {
+                HAL_StatusTypeDef result;
+                poll_at = now;
+                result = TMAG3001_ReadStatus(&sensor, &health.conv_status);
+                if (result != HAL_OK) degrade(result, TMAG3001_REG_CONV_STATUS);
+                else if (health.conv_status & TMAG3001_CONV_STATUS_COMPLETE) collect_sample(0U);
+                else if ((health.conv_status & 2U) ||
+                         (uint32_t)(HAL_GetTick() - armed_at) >= APP_CONV_TIMEOUT_MS) {
+                    disarm();
+                    error_frame((health.conv_status & 2U) ? TMAG_ERR_SENSOR_DIAG : TMAG_ERR_NO_CONV,
+                                TMAG3001_REG_CONV_STATUS);
+                }
+            }
+#endif
         }
         now = HAL_GetTick();
         if ((health.flags & TMAG_FLAG_SENSOR_READY) && (uint32_t)(now - nominal_at) >= APP_SAMPLE_PERIOD_MS) {
@@ -311,7 +333,10 @@ void App_Process(void)
                 uint32_t key = lock();
                 irq_pending = 0U;
                 armed_at = HAL_GetTick();
-                armed = 1U; /* EXTI may fire inside the trigger I2C write. */
+#if !APP_USE_INT
+                poll_at = armed_at;
+#endif
+                armed = 1U; /* IRQ mode also captures EXTI inside the trigger write. */
                 unlock(key);
                 HAL_StatusTypeDef result = TMAG3001_TriggerConversion(&sensor);
                 if (result != HAL_OK) degrade(result, TMAG3001_REG_DEVICE_CONFIG_1);

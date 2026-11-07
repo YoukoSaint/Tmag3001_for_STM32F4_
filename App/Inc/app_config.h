@@ -1,5 +1,20 @@
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
+#ifndef APP_USE_INT
+#define APP_USE_INT 0
+#endif
+#if APP_USE_INT != 0 && APP_USE_INT != 1
+#error "APP_USE_INT must be 0 or 1"
+#endif
+#ifndef APP_CONV_POLL_INTERVAL_MS
+#define APP_CONV_POLL_INTERVAL_MS 1U
+#endif
+#ifndef APP_CONV_TIMEOUT_MS
+#define APP_CONV_TIMEOUT_MS 5U
+#endif
+#if APP_CONV_POLL_INTERVAL_MS <= 0 || APP_CONV_TIMEOUT_MS <= 0 || APP_CONV_POLL_INTERVAL_MS > APP_CONV_TIMEOUT_MS
+#error "Conversion poll interval and timeout must be positive; interval must not exceed timeout"
+#endif
 #ifndef APP_SAMPLE_RATE_HZ
 #define APP_SAMPLE_RATE_HZ 100U
 #endif
