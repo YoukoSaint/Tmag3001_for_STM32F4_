@@ -16,7 +16,7 @@ from .color_panel import ColorPanel
 from .plot_widgets import MagPlotWidget
 from .serial_source import SerialSource
 from .csv_writer import CsvWriter
-from .protocol import Frame, PROTO_VERSION, to_celsius
+from .protocol import ERR_NONE, Frame, PROTO_VERSION, to_celsius
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +254,8 @@ class MainWindow(QMainWindow):
 
     def on_error(self, frame):
         if not isinstance(frame, Frame) or frame.kind != 'error':
+            return
+        if frame.err_code == ERR_NONE:
             return
         self.invalidate_metadata('传感器故障：' + (frame.err_name or str(frame.err_code)))
         key, now = (frame.err_code, frame.i2c_addr, frame.reg_addr), time.monotonic()

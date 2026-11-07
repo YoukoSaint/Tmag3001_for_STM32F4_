@@ -8,7 +8,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtGui import QCloseEvent
 from tmag_viewer import settings_manager
 from tmag_viewer.main_window import MainWindow
-from tmag_viewer.protocol import Frame
+from tmag_viewer.protocol import ERR_NONE, Frame
 
 
 class FakeSource(QObject):
@@ -36,7 +36,7 @@ class FakeSource(QObject):
 
 @pytest.fixture
 def window(qapp, monkeypatch, request):
-    directory = Path(__file__).resolve().parents[2] / 'build' / 'host-pytest-ui-rate' / 'settings' / request.node.name
+    directory = Path(__file__).resolve().parents[2] / 'build' / 'host-pytest-ui-none' / 'settings' / request.node.name
     directory.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(settings_manager, 'get_settings_path', lambda: directory / 'settings.json')
     monkeypatch.setattr('tmag_viewer.main_window.list_ports.comports', lambda: [])
@@ -55,6 +55,56 @@ def ready(sensitivity=500, **changes):
 
 def sample(x=1000):
     return Frame('data', 2, x_raw=x, y_raw=-1000, z_raw=500, temp_raw=17512)
+
+
+def test_none_before_status_keeps_waiting(window, caplog):
+    window.on_connection(True)
+    label = window.status_label.text()
+    throttle = (window._error_log_started, set(window._error_log_keys), window._error_log_suppressed)
+    window.on_error(Frame('error', 3, err_code=ERR_NONE, err_name='NONE'))
+    window.on_sample(sample())
+    assert window.metadata is None
+    assert not window.plot.samples and not window.csv_button.isEnabled()
+    assert window.status_label.text() == label
+    assert (window._error_log_started, window._error_log_keys, window._error_log_suppressed) == throttle
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+def test_none_preserves_calibration_and_csv_continuity(window, monkeypatch, caplog):
+    path = settings_manager.get_settings_path().with_suffix('.csv')
+    monkeypatch.setattr('tmag_viewer.main_window.QFileDialog.getSaveFileName', lambda *a: (str(path), 'CSV'))
+    window.on_connection(True)
+    window.on_status(ready(250, range_code=1))
+    metadata, label = window.metadata, window.status_label.text()
+    caplog.clear()
+    window.toggle_csv()
+    writer = window.csv_writer
+    window.on_sample(sample(1000))
+    window.on_error(Frame('error', 3, err_code=ERR_NONE, err_name='NONE'))
+    assert window.metadata is metadata
+    assert window.csv_writer is writer and window.csv_button.isEnabled()
+    assert window.status_label.text() == label
+    window.on_sample(sample(2000))
+    assert [row[1] for row in window.plot.samples] == [4.0, 8.0]
+    window.toggle_csv()
+    with path.open() as stream:
+        rows = list(csv.reader(stream))
+    assert len(rows) == 3 and [row[0] for row in rows[1:]] == ['4.0000', '8.0000']
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+def test_repeated_none_leaves_two_real_fault_warnings(window, monkeypatch, caplog):
+    monkeypatch.setattr('tmag_viewer.main_window.time.monotonic', lambda: 100.0)
+    window.on_connection(True)
+    for _ in range(100):
+        window.on_error(Frame('error', 3, err_code=ERR_NONE, err_name='NONE'))
+    assert not window._error_log_keys and window._error_log_suppressed == 0
+    for code, name in [(7, 'SENSOR_DIAG'), (4, 'I2C_READ')]:
+        window.on_error(Frame('error', 4, err_code=code, err_name=name))
+    warnings = [record.message for record in caplog.records if '传感器错误' in record.message]
+    assert len(warnings) == 2
+    assert 'SENSOR_DIAG' in warnings[0] and 'I2C_READ' in warnings[1]
+    assert all('suppressed=0' in warning for warning in warnings)
 
 
 def test_wait_status_and_received_scaling(window):
