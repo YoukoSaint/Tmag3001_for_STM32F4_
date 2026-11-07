@@ -90,6 +90,24 @@ def test_read_size_experiment_is_explicit_and_validated(tmp_path):
             load_capture().main(["--read-size", size])
 
 
+def test_capture_never_reconfigures_open_port_timeout(tmp_path):
+    capture = load_capture()
+    clock = Clock()
+    class StablePort(Serial):
+        @property
+        def timeout(self):
+            return 0.1
+
+        @timeout.setter
+        def timeout(self, value):
+            if hasattr(self, "configured"):
+                raise AssertionError("live timeout assignment reconfigures Windows VCP")
+            self.configured = True
+    port = StablePort(clock, [capture.protocol.encode_status(0, 0, 0, 885, 100, 0, 1, 0x10)])
+    assert capture.main(["--seconds", "1"], serial_factory=lambda **kw: port, clock=clock) == 0
+    assert port.closed and clock.now >= 1
+
+
 @pytest.mark.parametrize("rate", [500, 1000])
 def test_no_sensor_status_error_is_accepted(tmp_path, rate):
     p = load_capture().protocol

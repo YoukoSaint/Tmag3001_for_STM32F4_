@@ -123,7 +123,9 @@ def main(argv=None, *, serial_factory=None, clock=time.monotonic):
             finally:
                 result["flush_duration_seconds"] = clock() - flush_started
         while clock() < started + args.seconds:
-            serial_port.timeout = min(0.1, max(0.001, started + args.seconds - clock()))
+            # Keep the open-time timeout fixed. On Windows a timeout assignment
+            # reconfigures the whole port (SetCommState), disturbing live VCP RX.
+            # The final read may extend the requested window by this timeout.
             chunk = serial_port.read(args.read_size)
             result["read_bytes"] += len(chunk)
             if raw_file is not None:
