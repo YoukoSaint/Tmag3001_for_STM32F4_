@@ -54,7 +54,9 @@ class MainWindow(QMainWindow):
         self.csv_writer = None
         self._filter = None
         self._hsi_warned = self._int_warned = False
-        self._last_error = (None, float('-inf'))
+        self._error_log_started = float('-inf')
+        self._error_log_keys = set()
+        self._error_log_suppressed = 0
         self._started = time.monotonic()
         self._process = psutil.Process()
         self._process.cpu_percent(None)
@@ -178,7 +180,9 @@ class MainWindow(QMainWindow):
         self.connected = connected
         self.invalidate_metadata('等待有效状态' if connected else '未连接')
         self._hsi_warned = self._int_warned = False
-        self._last_error = (None, float('-inf'))
+        self._error_log_started = float('-inf')
+        self._error_log_keys.clear()
+        self._error_log_suppressed = 0
         self._stats = {}
         self._update_buttons()
 
@@ -253,9 +257,19 @@ class MainWindow(QMainWindow):
             return
         self.invalidate_metadata('传感器故障：' + (frame.err_name or str(frame.err_code)))
         key, now = (frame.err_code, frame.i2c_addr, frame.reg_addr), time.monotonic()
-        if key != self._last_error[0] or now - self._last_error[1] >= 5:
-            logger.warning('传感器错误 %s (code=%s addr=0x%02X reg=0x%02X)', frame.err_name, frame.err_code, frame.i2c_addr, frame.reg_addr)
-            self._last_error = (key, now)
+        if now - self._error_log_started >= 5:
+            self._error_log_started = now
+            self._error_log_keys.clear()
+        # Keep the first two distinct diagnostics per window, even if faults
+        # alternate every frame. The key set never grows beyond two entries.
+        if key not in self._error_log_keys and len(self._error_log_keys) < 2:
+            logger.warning('传感器错误 %s (code=%s addr=0x%02X reg=0x%02X suppressed=%d)',
+                           frame.err_name, frame.err_code, frame.i2c_addr,
+                           frame.reg_addr, self._error_log_suppressed)
+            self._error_log_keys.add(key)
+            self._error_log_suppressed = 0
+        else:
+            self._error_log_suppressed += 1
 
     def on_transport_error(self, reason):
         self.invalidate_metadata('串口异常：' + reason)

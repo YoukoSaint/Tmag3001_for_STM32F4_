@@ -36,7 +36,7 @@ class FakeSource(QObject):
 
 @pytest.fixture
 def window(qapp, monkeypatch, request):
-    directory = Path(__file__).resolve().parents[2] / 'build' / 'host-ui' / request.node.name
+    directory = Path(__file__).resolve().parents[2] / 'build' / 'host-pytest-ui-rate' / 'settings' / request.node.name
     directory.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(settings_manager, 'get_settings_path', lambda: directory / 'settings.json')
     monkeypatch.setattr('tmag_viewer.main_window.list_ports.comports', lambda: [])
@@ -137,6 +137,50 @@ def test_stats_and_dedup_health(window, qapp, caplog):
     for n in range(550):
         window.log_panel.appendPlainText(str(n))
     assert window.log_panel.document().blockCount() == 500
+
+
+def test_alternating_error_storm_is_bounded(window, monkeypatch, qapp, caplog):
+    clock = [100.0]
+    monkeypatch.setattr('tmag_viewer.main_window.time.monotonic', lambda: clock[0])
+    caplog.set_level(logging.INFO)
+    window.on_connection(True)
+    window.on_status(ready())
+    faults = [Frame('error', 3, err_code=7, err_name='SENSOR_DIAG'),
+              Frame('error', 4, err_code=4, err_name='I2C_READ')]
+    for index in range(120):
+        window.on_error(faults[index % 2])
+        clock[0] += 0.01
+    qapp.processEvents()
+    warnings = [r.message for r in caplog.records if '传感器错误' in r.message]
+    assert len(warnings) == 2
+    assert 'SENSOR_DIAG' in warnings[0] and 'I2C_READ' in warnings[1]
+    assert window.metadata is None and not window.csv_button.isEnabled()
+    assert 'I2C_READ' in window.status_label.text()
+    assert window.log_panel.toPlainText().count('传感器错误') == 2
+
+    clock[0] = 105.0
+    window.on_error(faults[0])
+    warnings = [r.message for r in caplog.records if '传感器错误' in r.message]
+    assert len(warnings) == 3
+    assert 'SENSOR_DIAG' in warnings[-1] and 'suppressed=118' in warnings[-1]
+    window.source.stats = dict(window.source.stats, errors=120)
+    window.report_health()
+    assert 'errors=120' in caplog.text
+
+
+def test_distinct_error_burst_and_reconnect(window, monkeypatch, caplog):
+    monkeypatch.setattr('tmag_viewer.main_window.time.monotonic', lambda: 100.0)
+    window.on_connection(True)
+    for code in range(256):
+        window.on_error(Frame('error', code, err_code=code, err_name=str(code)))
+    assert sum('传感器错误' in r.message for r in caplog.records) == 2
+    assert len(window._error_log_keys) == 2
+    window.on_connection(False)
+    window.on_connection(True)
+    window.on_error(Frame('error', 3, err_code=7, err_name='SENSOR_DIAG'))
+    warnings = [r.message for r in caplog.records if '传感器错误' in r.message]
+    assert len(warnings) == 3 and 'SENSOR_DIAG' in warnings[-1]
+    assert 'suppressed=0' in warnings[-1]
 
 
 def test_shutdown_timeout_keeps_handlers_timers(window):
