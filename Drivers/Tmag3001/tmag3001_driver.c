@@ -149,24 +149,37 @@ HAL_StatusTypeDef TMAG3001_ReadMagData(TMAG3001_Handle_t *dev, TMAG3001_Data_t *
 HAL_StatusTypeDef TMAG3001_ReadAll(TMAG3001_Handle_t *dev, TMAG3001_Data_t *data)
 {
     HAL_StatusTypeDef status;
-    uint8_t buffer[2];
-    int16_t temp_raw;
+    uint8_t cs = 0;
 
-    // Read magnetic data
-    status = TMAG3001_ReadMagData(dev, data);
+    /* In continuous mode the conversion finishes every ~322 us. We poll
+     * CONV_STATUS but cap the wait at ~2 ms so a single slow cycle doesn't
+     * stall the whole 100 ms main loop. */
+    for (int i = 0; i < 5; i++) {
+        status = TMAG3001_ReadRegister(dev, TMAG3001_REG_CONV_STATUS, &cs);
+        if (status == HAL_OK && (cs & 0x01)) break;
+    }
+    data->conv_status = cs;
+
+    /* Read magnetic data — multi-byte read (6 bytes from 0x12) is the
+     * documented protocol and is faster than 6 single-byte reads. */
+    uint8_t buf6[6];
+    status = TMAG3001_ReadMultiple(dev, TMAG3001_REG_X_RESULT_MSB, buf6, 6);
     if (status != HAL_OK) return status;
+    int16_t x_raw = (int16_t)((buf6[0] << 8) | buf6[1]);
+    int16_t y_raw = (int16_t)((buf6[2] << 8) | buf6[3]);
+    int16_t z_raw = (int16_t)((buf6[4] << 8) | buf6[5]);
+    data->x_mT = TMAG3001_CountsToMagnetic(x_raw, dev->range);
+    data->y_mT = TMAG3001_CountsToMagnetic(y_raw, dev->range);
+    data->z_mT = TMAG3001_CountsToMagnetic(z_raw, dev->range);
 
-    // Read temperature (0x10 - 0x11)
-    status = TMAG3001_ReadMultiple(dev, TMAG3001_REG_T_RESULT_MSB, buffer, 2);
+    /* Temperature: 2 bytes from 0x10 */
+    uint8_t buf2[2];
+    status = TMAG3001_ReadMultiple(dev, TMAG3001_REG_T_RESULT_MSB, buf2, 2);
     if (status != HAL_OK) return status;
-
-    temp_raw = (int16_t)((buffer[0] << 8) | buffer[1]);
+    int16_t temp_raw = (int16_t)((buf2[0] << 8) | buf2[1]);
     data->temperature_C = TMAG3001_CountsToTemperature(temp_raw);
 
-    // Read conversion status (0x18)
-    status = TMAG3001_ReadRegister(dev, TMAG3001_REG_CONV_STATUS, &data->conv_status);
-
-    return status;
+    return HAL_OK;
 }
 
 HAL_StatusTypeDef TMAG3001_ReadStatus(TMAG3001_Handle_t *dev, uint8_t *status)
