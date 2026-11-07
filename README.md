@@ -1,6 +1,6 @@
 # TMAG3001 / STM32F411 采集与显示
 
-固件通过 I2C 触发 TMAG3001 转换、轮询转换状态（可选 PB5 完成中断），经 USART1 输出二进制帧；Python 桌面端显示 XYZ/温度并保存 CSV。**轮询已取得健康 XYZ/温度数据，但传输缺口仍未解决，不能宣称无损连续采集通过。** 代码实现与验收进度分别见[执行状态](docs/superpowers/plans/2026-11-07-execution-status.md)和[扫频记录](docs/superpowers/plans/2026-11-07-sample-rate-sweep-results.md)。
+固件通过I2C触发TMAG3001转换，默认纯轮询，经USART1输出二进制帧；Python桌面端显示XYZ/温度并保存CSV。**当前固定使用100 Hz，用户已要求停止高频测试。** 抓包工具修复重复串口配置后，35.047秒实测3501 DATA、实际99.894 Hz、零SEQ缺口/跳过字节/错误；真实上位机曲线与CSV已通过联调，现交由用户测试。代码与历史证据见[执行状态](docs/superpowers/plans/2026-11-07-execution-status.md)和[扫频记录](docs/superpowers/plans/2026-11-07-sample-rate-sweep-results.md)。
 
 按用户授权，当前默认 `APP_USE_INT=0` 纯轮询转换完成状态，每1 ms检查、5 ms超时，关闭传感器 INT 输出；设置 `APP_USE_INT=1` 可选择原 INT 模式。PB5 的板级输入/IRQ配置保留，轮询模式忽略边沿、INT_PATH_OK保持0。初次10秒实测989组DATA、98.447 Hz、0诊断错误，仍有11个SEQ缺口和63个解析跳过字节。
 
