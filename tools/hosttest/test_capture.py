@@ -6,8 +6,10 @@ status timing. Sequence loss is modulo 256 across ALL frame types; a whole
 written to the serial port.
 
 Optional raw output contains original reads, including noise and incomplete
-tails. It is created exclusively (never overwrites an existing file). On any
-capture or output failure it may be partial; raw_complete is then false.
+tails. It is created exclusively (never overwrites an existing file). Serial
+or raw-I/O failures preserve partial raw output and leave raw_complete false.
+raw_complete reflects serial/raw-I/O completion; later frame validation or
+JSON output failure is independent and may leave raw_complete true.
 Elapsed time and DATA Hz include serial open and optional input flush time.
 """
 from __future__ import annotations
