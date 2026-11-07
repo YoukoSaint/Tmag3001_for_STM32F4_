@@ -5,9 +5,11 @@ from collections import deque
 
 import pytest
 from PyQt5.QtTest import QTest
+from PyQt5.QtCore import QObject
 
 from tmag_viewer import protocol as p
 from tmag_viewer.serial_source import SerialSource
+from tmag_viewer import serial_source
 
 
 class FakeSerial:
@@ -233,7 +235,9 @@ def test_close_during_delivery_prevents_old_session_frames(source):
 
 def test_close_from_connection_signal_does_not_start_orphan(source):
     source.connection_changed.connect(lambda connected: source.close() if connected else None)
-    fake = connect_fake(source, [])
+    fake = FakeSerial()
+    source._serial_factory = lambda **kwargs: fake
+    assert not source.open("FAKE")
     assert fake.closed and source._worker is None
 
 
@@ -307,3 +311,119 @@ def test_failed_shutdown_keeps_worker_reference_until_stopped(source):
         assert worker.wait(1000)
         source.close()
     assert source._worker is None
+
+
+@pytest.fixture
+def fake_workers(monkeypatch):
+    workers = []
+
+    class FakeWorker(QObject):
+        def __init__(self, connection, owner):
+            super().__init__(owner)
+            self.connection = connection
+            self.stop_requested = threading.Event()
+            self.failure = None
+            self.running = False
+            self.wait_calls = 0
+            workers.append(self)
+
+        def start(self):
+            self.running = True
+
+        def isRunning(self):
+            return self.running
+
+        def wait(self, timeout):
+            self.wait_calls += 1
+            if self.running:
+                self.connection.close()
+                self.running = False
+            return True
+
+    monkeypatch.setattr(serial_source, "_Reader", FakeWorker)
+    return workers
+
+
+def test_reopen_from_disconnect_supersedes_outer_open(source, fake_workers):
+    ports, changes, updates = [], [], []
+
+    def factory(**kwargs):
+        ports.append(kwargs["port"])
+        return FakeSerial()
+
+    source._serial_factory = factory
+    source.connection_changed.connect(changes.append)
+    source.stats_updated.connect(updates.append)
+    assert source.open("A")
+    source._record(p.decode_frame(p.encode_data(10, 1, 2, 3, 4)), 0)
+
+    def reopen(connected):
+        if not connected and len(ports) == 1:
+            assert source.open("C")
+
+    source.connection_changed.connect(reopen)
+    assert not source.open("B")
+    assert ports == ["A", "C"]
+    assert source._worker is fake_workers[-1]
+    assert changes == [True, False, True]
+    assert source.stats["frames"] == 0
+    assert not updates  # The superseded close must not emit C's stats.
+    source.close()
+    assert all(not worker.isRunning() and worker.connection.closed
+               and worker.wait_calls == 1 for worker in fake_workers)
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_open_error_reconnect_has_no_stale_disconnection(source, fake_workers, invalid):
+    changes = []
+    source.connection_changed.connect(changes.append)
+
+    def factory(**kwargs):
+        if kwargs["port"] == "BAD":
+            raise OSError("cannot open")
+        return FakeSerial()
+
+    source._serial_factory = factory
+    source.transport_error.connect(lambda message: source.open("GOOD"))
+    assert not source.open("" if invalid else "BAD")
+    assert changes == [True]
+    assert source._connected and source._worker.isRunning()
+    assert source._port == "GOOD" and source.stats["frames"] == 0
+    source.close()
+    assert all(not worker.isRunning() and worker.connection.closed
+               for worker in fake_workers)
+
+
+def test_stats_reopen_does_not_inspect_or_drain_replacement(source, fake_workers):
+    now, received, errors = [10.0], [], []
+    source._clock = lambda: now[0]
+    source._serial_factory = lambda **kwargs: FakeSerial()
+    source.sample_received.connect(received.append)
+    source.transport_error.connect(errors.append)
+    assert source.open("OLD")
+    old = source._worker
+
+    def reopen(snapshot):
+        if source._worker is old:
+            now[0] = 12.0
+            assert source.open("NEW")
+            source._record(p.decode_frame(p.encode_data(7, 1, 2, 3, 4)), 0)
+            source._worker.failure = "new read failed"
+            source._worker.connection.close()
+            source._worker.running = False
+
+    source.stats_updated.connect(reopen)
+    now[0] = 11.0
+    source._poll()
+    assert source._worker is fake_workers[-1]
+    assert source._port == "NEW" and source._connected
+    assert source._last_stats == 12.0
+    assert source.stats["frames"] == source.stats["queue_depth"] == 1
+    assert not received and not errors
+    source._poll()
+    assert [frame.seq for frame in received] == [7]
+    assert errors == ["new read failed"]
+    assert source._worker is None
+    assert all(not worker.isRunning() and worker.connection.closed
+               and worker.wait_calls == 1
+               for worker in fake_workers)

@@ -64,6 +64,8 @@ class SerialSource(QObject):
         self._lock = threading.Lock()
         self._queue = deque()
         self._worker = None
+        # Synchronous Qt slots can issue a newer lifecycle request mid-emission.
+        self._operation = 0
         self._port, self._baud = "", 115200
         self._connected = False
         self._started = self._clock()
@@ -124,11 +126,17 @@ class SerialSource(QObject):
             self._queue.append(frame)
 
     def open(self, port: str, baud: int = 115200) -> bool:
-        self.close()
+        """Open a session; return False if a synchronous slot supersedes it."""
+        self._operation += 1
+        operation = self._operation
+        self._close(operation)
+        if self._operation != operation:
+            return False
         if (not isinstance(port, str) or not port.strip() or isinstance(baud, bool)
                 or not isinstance(baud, int) or baud <= 0):
             self.transport_error.emit("Invalid serial port or baud rate")
-            self.connection_changed.emit(False)
+            if self._operation == operation:
+                self.connection_changed.emit(False)
             return False
         self._port, self._baud = port, baud
         self._reset()
@@ -141,7 +149,11 @@ class SerialSource(QObject):
         except Exception as exc:
             logger.exception("[transport=serial][addr=%s@%d] open failed", port, baud)
             self.transport_error.emit(str(exc))
-            self.connection_changed.emit(False)
+            if self._operation == operation:
+                self.connection_changed.emit(False)
+            return False
+        if self._operation != operation:
+            connection.close()
             return False
         self._worker = _Reader(connection, self)
         self._connected = True
@@ -149,10 +161,11 @@ class SerialSource(QObject):
         self._worker.start()
         self._timer.start()
         self.connection_changed.emit(True)
-        return True
+        return self._operation == operation
 
     def _poll(self):
         session = self._worker
+        operation = self._operation
         with self._lock:
             pending = list(self._queue)
             self._queue.clear()
@@ -166,12 +179,12 @@ class SerialSource(QObject):
                 self._last_queue_log = now
             message = "Serial delivery queue overflow: %d frames lost" % queue_dropped
             self.transport_error.emit(message)
-            if self._worker is not session:
+            if self._worker is not session or self._operation != operation:
                 return
             if status_dropped:
                 self.metadata_invalidated.emit(message + "; status may need refresh")
         for frame in pending:
-            if self._worker is not session:
+            if self._worker is not session or self._operation != operation:
                 return
             if frame.kind == "data":
                 self.sample_received.emit(frame)
@@ -179,26 +192,33 @@ class SerialSource(QObject):
                 self.status_received.emit(frame)
             else:
                 self.error_received.emit(frame)
-                if self._worker is not session:
+                if self._worker is not session or self._operation != operation:
                     return
                 now = self._clock()
                 if frame.err_code != ERR_NONE and now - self._last_error_log >= 5:
                     logger.warning("[transport=serial][addr=%s@%d] firmware error=%s code=%d errors=%d", self._port, self._baud, frame.err_name, frame.err_code, self.stats["errors"])
                     self._last_error_log = now
-        if self._worker is not session:
+        if self._worker is not session or self._operation != operation:
             return
         now = self._clock()
         if now - self._last_stats >= 0.2:
             self.stats_updated.emit(self.stats)
+            if self._worker is not session or self._operation != operation:
+                return
             self._last_stats = now
-        worker = self._worker
+        worker = session
         if worker is not None and not worker.isRunning() and worker.failure is not None:
             self.transport_error.emit(worker.failure)
             # A synchronous error handler may already have opened a new session.
-            if self._worker is worker:
+            if self._worker is worker and self._operation == operation:
                 self.close()
 
     def close(self) -> None:
+        self._operation += 1
+        self._close(self._operation)
+
+    def _close(self, operation):
+        """Retire the current reader within the caller's lifecycle request."""
         worker = self._worker
         if worker is None:
             return
@@ -209,6 +229,8 @@ class SerialSource(QObject):
                 cancel()
         except Exception:
             logger.exception("[transport=serial][addr=%s@%d] cancel read failed", self._port, self._baud)
+        if QThread.currentThread() is worker:
+            raise RuntimeError("Serial reader cannot wait for itself")
         if not worker.wait(500):
             try:
                 worker.connection.close()
@@ -227,4 +249,6 @@ class SerialSource(QObject):
             self._connected = False
             logger.info("[transport=serial][addr=%s@%d] STOP metrics=%s", self._port, self._baud, self.stats)
             self.connection_changed.emit(False)
+            if self._operation != operation:
+                return
         self.stats_updated.emit(self.stats)
