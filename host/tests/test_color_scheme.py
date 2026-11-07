@@ -1,6 +1,7 @@
 """Pure Python palette contract, with no GUI or installed Qt required."""
 
 import importlib
+from pathlib import Path
 import subprocess
 import sys
 
@@ -130,5 +131,6 @@ def test_import_does_not_load_qt(palette):
             "import sys; import tmag_viewer.color_scheme; "
             "assert not any(name.startswith(('PyQt', 'PySide')) for name in sys.modules)"
         )], capture_output=True, text=True, check=False,
+        cwd=Path(__file__).resolve().parents[1],
     )
     assert result.returncode == 0, result.stderr
