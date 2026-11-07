@@ -1,6 +1,6 @@
-# TMAG3001 串口线协议 v1.2（草案，待实现）
+# TMAG3001 串口线协议 v1.2
 
-本文件是固件与 PC 的统一契约。当前导入的遗产代码不代表已实现本协议；实施/硬件验收状态见 [执行状态](../superpowers/plans/2026-11-07-execution-status.md)。版本字节为 `0x12`。串口默认 USART1 / 115200 / 8N1；无文本日志。
+本文件是当前 C 固件与 Python 主机已实现的统一契约；实现通过离线编解码测试，真实状态、故障与健康轮询 DATA 均已观测；无损连续采集仍待验收。实施/硬件验收状态见[执行状态](../superpowers/plans/2026-11-07-execution-status.md)。版本字节为 `0x12`。串口默认 USART1 / 115200 / 8N1；线上无文本日志。
 
 ## 帧布局
 
@@ -28,7 +28,7 @@ RATE_X10=0 时 byte7 单位 Hz；=1 时单位 10 Hz。编码规则：逻辑**整
 
 固件毫秒调度器限制独立于线协议：`0 < APP_SAMPLE_RATE_HZ <= 1000` 且 `1000 % APP_SAMPLE_RATE_HZ == 0`，编译期保护；100/200/500/1000 Hz 支持整数周期。协议可表示更广范围不表示该调度器能产生这些速率。实际 Hz 由 PC 单独用数据帧计数/经过时间测量，状态/错误帧不计入；稳定上限仍须硬件扫频确定。
 
-错误帧 `EE`：byte3 ERR_CODE、4 I2C_ADDR（7位地址，如34）、5 REG_ADDR、6..10 保留0。错误码：00 NONE/READY、01 I2C_NACK、02 SENSOR_ID、03 CONFIG_FAIL、04 I2C_READ、05 I2C_TIMEOUT、06 NO_CONV、07 SENSOR_DIAG、08 OVERFLOW、09 TX_OVERFLOW。未知错误码可展示为 UNKNOWN，不能改帧长。
+错误帧 `EE`：byte3 ERR_CODE、4 I2C_ADDR（7位地址，如34）、5 REG_ADDR、6..10 保留0。错误码：00 NONE/READY、01 I2C_NACK、02 SENSOR_ID、03 CONFIG_FAIL、04 I2C_READ、05 I2C_TIMEOUT、06 NO_CONV、07 SENSOR_DIAG、08 保留的历史 OVERFLOW 编号、09 TX_OVERFLOW。未知错误码可展示为 UNKNOWN，不能改帧长。发送端必须把保留字节清零；接收端应检查这些字节，防止噪声形成 XOR 碰撞后误认 ERROR。
 
 ## 五组跨语言 golden（十六进制）
 
@@ -45,6 +45,14 @@ AA 56 42 12 AC 03 75 64 00 01 00 EF
 AA EE 07 01 34 0E 00 00 00 00 00 3C
 ```
 
-流解析：扫描 AA → 检查 TYPE → 等待12 B → XOR → 状态检查版本12 → 分发。失败时滑动1 B重新同步；`struct.unpack(">BBHBBBB", payload)` 返回 **7 项**：version, flags, sensitivity, rate, errcnt, conv, devst（H 已是完整 sensitivity）。
+流解析：扫描 AA → 检查 TYPE → 等待12 B → XOR → 状态检查版本12 / ERROR检查保留字节全0 → 分发。失败时滑动1 B重新同步；`struct.unpack(">BBHBBBB", payload)` 返回 **7 项**：version, flags, sensitivity, rate, errcnt, conv, devst（H 已是完整 sensitivity）。
 
-> Device_Status 更正（datasheet §7.1.29，PDF第57页）：bit4 INT_RB、bit2 INT_ER、bit1 OTP_CRC_ER、bit0 THR_Cross，没有 overflow 位。0x08 OVERFLOW 仅保留兼容编号，无已证实溢出条件不得发出；THR_Cross/INT_RB 不得当溢出。INT_ER/OTP_CRC_ER 映射 ERR_SENSOR_DIAG。Task5/6 必须读取并上报实际 Device_Status，不得始终发送初始化0；需驱动/应用测试验证。
+## 诊断与健康判据
+
+按用户授权，当前默认纯轮询模式仍由 I2C 命令触发（TRIGGER_INT=0），INT_PATH_OK保持0，不能仅据此判定健康采集失败；该标志只证明中断路径是否已验证。`APP_USE_INT=1` 保留可选完成中断模式。健康判据和线帧布局不因轮询而改变，实施/硬件验证进度以执行状态为准。
+
+Device_Status（datasheet §7.1.29，PDF 第57页）：bit4 INT_RB、bit2 INT_ER（W1C）、bit1 OTP_CRC_ER、bit0 THR_Cross，没有 overflow 位。THR_Cross/INT_RB 不得当溢出，INT_RB 的回读置位本身不是故障；0x08 仅保留兼容编号，无已证实溢出条件不得发出。INT_ER/OTP_CRC_ER 映射 ERR_SENSOR_DIAG。驱动/应用读取并上报实际 Device_Status 与 Conv_Status。
+
+健康采集要求 SENSOR_READY 和 CFG_OK 均置位、sensitivity > 0，且当前 `CONV_STATUS & 0x02 == 0`、`DEVICE_STATUS & 0x06 == 0`。READY/CFG 可能在后续故障时仍保留，不能单独作为健康证据；累计错误计数也不能替代当前寄存器诊断。固件每次 App_Init 最多一次以 W1C `0x04` 清历史 INT_ER，不写整个 `0x14`，不清 OTP_CRC_ER、不反复清除掩盖持续故障。当前 I2C 命令触发使 TRIGGER_INT=0；可选 INT 模式使用 PB5 接收完成，INT_PATH_OK 只在中断完成路径确实验证后置位，默认轮询模式始终清零。
+
+全局 SEQ 缺口是模256的推断值，解析器重同步跳过量以字节计，主机队列丢弃量按其队列统计，三者不能相加或互相替代。XOR 很弱，噪声可形成校验碰撞；历史抓包中一次误认帧已使 SEQ 缺口统计失真，因此不能把旧报告的全部缺口称为已证明的物理丢帧。实际 DATA 速率和上限见[扫频记录](../superpowers/plans/2026-11-07-sample-rate-sweep-results.md)。

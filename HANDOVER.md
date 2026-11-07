@@ -1,5 +1,7 @@
 # 交接文档：TMAG3001 × STM32F411 采集链路
 
+> **2026-11-07 当前状态（优先于下方历史交接）**：C/Python v1.2已实现；默认纯轮询已取得健康XYZ/温度，四档扫频已实测，35秒真实上位机曲线/CSV/日志联调已通过。串口SEQ缺口仍未解决，无损连续采集不能标为通过。高频/烧录过程中另观察到SDA低和I2C BUSY，`682e67e`加入有界总线恢复后已重新采样并完成联调。保持默认100 Hz，未push、未装依赖、无可见GUI；PyInstaller仅模板。当前进度以[执行状态](docs/superpowers/plans/2026-11-07-execution-status.md)、[README](README.md)与[线协议](docs/protocol/TMAG3001_Protocol.md)为准。用户最新要求后续尽可能由主agent直接实施，仅必要时集中独立审查，覆盖下方逐任务派子agent的历史要求。用户已允许轮询，INT路径可选。下方旧HEAD、待实现草案及INT必选等均为历史，保留原文。
+
 > **2026-11-07 执行前更正**：v1.2（0x12）仍为待实现草案。线协议唯一契约是 `docs/protocol/TMAG3001_Protocol.md`，进度见 `docs/superpowers/plans/2026-11-07-execution-status.md`。CRC8/crc8/tmag_crc8 是遗留命名，算法仅为字节 XOR。
 
 
