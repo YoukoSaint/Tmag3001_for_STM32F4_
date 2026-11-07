@@ -61,7 +61,7 @@ else()
 endif()
 message(STATUS "STM32CubeF4 drivers: ${STM32_DRIVERS_DIR}")
 set(FIRMWARE_SOURCES
-    Core/Src/main.c Core/Src/stm32f4xx_it.c Core/Src/stm32f4xx_hal_msp.c
+    Core/Src/main.c Core/Src/i2c_bus_recovery.c Core/Src/stm32f4xx_it.c Core/Src/stm32f4xx_hal_msp.c
     Core/Src/system_stm32f4xx.c Core/Src/syscalls.c Core/Src/sysmem.c
     App/Src/app.c App/Src/tmag_proto.c Drivers/Tmag3001/tmag3001_driver.c startup_stm32f411xe.s)
 foreach(_source IN LISTS _hal_sources)

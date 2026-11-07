@@ -183,6 +183,13 @@ static void connect_sensor(void)
         .mode = TMAG3001_MODE_STANDBY, .avg = TMAG3001_AVG_1X,
         .channels = TMAG3001_CH_XYZ, .enable_int = APP_USE_INT
     };
+    result = App_BoardPrepareI2C(sensor_i2c);
+    if (result != HAL_OK) {
+        sensor.i2c_addr = 0U;
+        error_frame(bus_error(result), 0U);
+        retry_at = HAL_GetTick();
+        return;
+    }
     for (addr = APP_I2C_FIRST_ADDRESS; addr <= APP_I2C_LAST_ADDRESS; ++addr) {
         result = HAL_I2C_IsDeviceReady(sensor_i2c, (uint16_t)addr << 1, 1U, APP_I2C_TIMEOUT_MS);
         if (result == HAL_OK) break;

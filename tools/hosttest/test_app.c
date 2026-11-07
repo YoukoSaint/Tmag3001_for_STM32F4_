@@ -13,6 +13,12 @@ static DMA_HandleTypeDef dma;
 static HAL_StatusTypeDef deinit_result, dma_init_result;
 static unsigned deinits, dma_inits;
 static I2C_HandleTypeDef i2c;
+static HAL_StatusTypeDef prepare_result;
+HAL_StatusTypeDef App_BoardPrepareI2C(I2C_HandleTypeDef *p)
+{
+    CHECK(p == &i2c, "prepare only sensor I2C");
+    return prepare_result;
+}
 static uint32_t tick, mask, read_delay;
 static uint8_t present, found_address, id_lo, id_hi, device_id, conv, devstatus, hse;
 static HAL_StatusTypeDef scan_result, init_result, config_result, register_result,
@@ -164,6 +170,7 @@ static unsigned count_error(uint8_t e) { unsigned n=0;for(unsigned i=0;i<frame_c
 static const uint8_t *last_status(void) { for(unsigned i=frame_count;i>0;i--) if(frames[i-1][1]==0x56)return frames[i-1];return NULL; }
 static void reset(int sensor_present)
 {
+    prepare_result=HAL_OK;
     tick=mask=read_delay=0;
     present=(uint8_t)sensor_present;found_address=0x36;id_lo=0x49;id_hi=0x54;device_id=0;
     conv=1;devstatus=0x11;hse=1;scan_result=HAL_ERROR;

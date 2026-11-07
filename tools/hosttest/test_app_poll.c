@@ -95,6 +95,10 @@ static void test_poll_schedule(void)
 }
 int main(void)
 {
+    reset(1);prepare_result=HAL_TIMEOUT;boot();
+    CHECK(probes==0 && count_error(TMAG_ERR_I2C_TIMEOUT)==1,"failed bus recovery gates scanning");
+    step(APP_RETRY_MS-1);CHECK(probes==0,"recovery failure observes retry interval");
+    prepare_result=HAL_OK;step(1);CHECK(probes==3 && inits==1,"next bounded retry can reconnect");
     test_ready_poll();test_poll_timeout_and_interval();test_poll_faults();test_poll_schedule();
     for(unsigned i=0;i<frame_count;i++) CHECK_EQ_U8(tmag_crc8(frames[i]+2,9),frames[i][11]);
     TEST_REPORT();

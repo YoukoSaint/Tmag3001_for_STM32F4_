@@ -6,6 +6,11 @@ $gcc = (Get-Command gcc -ErrorAction SilentlyContinue).Source
 if (-not $gcc) { $gcc = 'C:\mingw64\bin\gcc.exe' }
 $includes = @('-I',"$PSScriptRoot\app_mocks",'-I',"$repo\App\Inc",'-I',"$repo\Drivers\Tmag3001",'-I',$PSScriptRoot)
 $strict = @('-std=c11','-Wall','-Wextra','-Werror')
+$busExe = Join-Path $out 'test_i2c_bus_recovery.exe'
+& $gcc @strict '-I' "$PSScriptRoot\bus_mocks" '-I' "$repo\App\Inc" '-I' $PSScriptRoot "$PSScriptRoot\test_i2c_bus_recovery.c" "$repo\Core\Src\i2c_bus_recovery.c" '-o' $busExe
+if ($LASTEXITCODE -ne 0) { throw 'Bus recovery compilation failed.' }
+& $busExe
+if ($LASTEXITCODE -ne 0) { throw 'Bus recovery checks failed.' }
 # The polling suite builds the production default without a mode override.
 foreach ($suite in @('test_app_poll','test_app')) {
     $exe = Join-Path $out "$suite.exe"
