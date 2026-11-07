@@ -4,6 +4,39 @@ param(
     [string]$ProgrammerPath = $(if ($env:STM32_PROGRAMMER_CLI) { $env:STM32_PROGRAMMER_CLI } else { 'C:\ST\STM32CubeCLT_1.21.0\STM32CubeProgrammer\bin\STM32_Programmer_CLI.exe' })
 )
 $ErrorActionPreference = 'Stop'
+function Assert-FirmwareFresh {
+    param([Parameter(Mandatory)][string]$BuildDirectory)
+
+    # Use the configured Ninja graph and recorded compiler header dependencies,
+    # including only the selected SDK inputs. Missing metadata fails closed.
+    foreach ($name in @('build.ninja', 'CMakeCache.txt', '.ninja_log', '.ninja_deps')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $BuildDirectory $name) -PathType Leaf)) {
+            throw "Firmware freshness metadata is missing: $name. Run tools/build.ps1 first."
+        }
+    }
+    $makeProgram = @(Get-Content -LiteralPath (Join-Path $BuildDirectory 'CMakeCache.txt') |
+        Where-Object { $_ -match '^CMAKE_MAKE_PROGRAM:FILEPATH=' })
+    if ($makeProgram.Count -ne 1) {
+        throw 'Cannot identify configured Ninja. Run tools/build.ps1 first.'
+    }
+    $ninjaPath = $makeProgram[0].Substring('CMAKE_MAKE_PROGRAM:FILEPATH='.Length)
+    if (-not (Test-Path -LiteralPath $ninjaPath -PathType Leaf)) {
+        throw "Configured Ninja is missing: $ninjaPath"
+    }
+    Push-Location -LiteralPath $BuildDirectory
+    try {
+        # -n never executes commands, including CMake regeneration or compilers.
+        # Ninja's fixed English no-work status is the only accepted output;
+        # scheduled commands, warnings and native failures all reject flashing.
+        $dryRun = @(& $ninjaPath -n TMA3001_.elf 2>&1)
+        $ninjaExitCode = $LASTEXITCODE
+        if ($ninjaExitCode -ne 0 -or $dryRun.Count -ne 1 -or
+            "$($dryRun[0])" -cne 'ninja: no work to do.') {
+            throw "Firmware freshness could not be confirmed (Ninja exit $ninjaExitCode): $($dryRun -join ' '). Run tools/build.ps1 first."
+        }
+    }
+    finally { Pop-Location }
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $flashExitCode = 0
 Push-Location -LiteralPath $repoRoot
@@ -13,19 +46,7 @@ try {
         throw "Firmware output is missing: $elfPath. Run tools/build.ps1 -Preset $Preset first."
     }
     $elf = Get-Item -LiteralPath $elfPath
-    # A conservative source/configuration freshness check; never rebuild or
-    # silently select another artifact inside the flash operation.
-    $inputs = @('App/Inc', 'App/Src', 'Core/Inc', 'Core/Src', 'Drivers/Tmag3001') | ForEach-Object {
-        Get-ChildItem -LiteralPath (Join-Path $repoRoot $_) -Recurse -File |
-            Where-Object { $_.Extension -in @('.c', '.h', '.s') }
-    }
-    $inputs += @('CMakeLists.txt', 'CMakePresets.json', 'cmake/firmware_sources.cmake', 'cmake/gcc-arm-none-eabi.cmake', 'STM32F411XX_FLASH.ld', 'startup_stm32f411xe.s') | ForEach-Object {
-        Get-Item -LiteralPath (Join-Path $repoRoot $_)
-    }
-    $newer = $inputs | Where-Object { $_.LastWriteTimeUtc -gt $elf.LastWriteTimeUtc } | Select-Object -First 1
-    if ($newer) {
-        throw "Firmware may be stale: $($newer.FullName) is newer than $elfPath. Rebuild preset $Preset first."
-    }
+    Assert-FirmwareFresh -BuildDirectory (Join-Path $repoRoot "build/$Preset")
     if (-not (Test-Path -LiteralPath $ProgrammerPath -PathType Leaf)) {
         throw "STM32 Programmer CLI not found: $ProgrammerPath. Set -ProgrammerPath or STM32_PROGRAMMER_CLI explicitly."
     }
