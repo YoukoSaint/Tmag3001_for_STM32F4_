@@ -18,6 +18,9 @@ static uint8_t present, found_address, id_lo, id_hi, device_id, conv, devstatus,
 static HAL_StatusTypeDef scan_result, init_result, config_result, register_result,
     trigger_result, sample_result, status_result, device_result, start_result, abort_result;
 static unsigned probes, inits, triggers, reads, polls, starts, aborts, frame_count;
+static unsigned diagnostic_writes, device_reads, device_fail_at;
+static uint8_t persistent_int, fresh_conv;
+static HAL_StatusTypeDef diagnostic_write_result, device_fail_result;
 static uint8_t frames[8192][12], active_copy[12];
 static uint8_t *dma_ptr;
 static int auto_irq, complete_on_unlock, inside_dma, ownership_failures;
@@ -107,10 +110,19 @@ HAL_StatusTypeDef TMAG3001_ReadRegister(TMAG3001_Handle_t *d,uint8_t r,uint8_t *
     return register_result;
 }
 HAL_StatusTypeDef TMAG3001_ReadDeviceID(TMAG3001_Handle_t *d,uint8_t *v) { (void)d;*v=device_id;return register_result; }
+HAL_StatusTypeDef TMAG3001_WriteRegister(TMAG3001_Handle_t *d,uint8_t r,uint8_t v)
+{
+    CHECK(d->config_valid && mask==0,"diagnostic recovery after verified config in main context");
+    CHECK(r==TMAG3001_REG_DEVICE_STATUS && v==0x04,"only INT_ER W1C bit may be written");
+    diagnostic_writes++;
+    if(diagnostic_write_result==HAL_OK && !persistent_int) devstatus&=(uint8_t)~0x04U;
+    return diagnostic_write_result;
+}
 HAL_StatusTypeDef TMAG3001_TriggerConversion(TMAG3001_Handle_t *d)
 {
     CHECK(d->i2c_addr==found_address && mask==0,"trigger main context and found address");
     triggers++;
+    if(fresh_conv) conv=fresh_conv;
     if(auto_irq) App_OnSensorInt();
     return trigger_result;
 }
@@ -123,8 +135,14 @@ HAL_StatusTypeDef TMAG3001_ReadSample(TMAG3001_Handle_t *d,TMAG3001_Data_t *v)
     *v=(TMAG3001_Data_t){.x_raw=-1234,.y_raw=2345,.z_raw=-32768,.temp_raw=17508,.conv_status=conv};
     return sample_result;
 }
-HAL_StatusTypeDef TMAG3001_ReadStatus(TMAG3001_Handle_t *d,uint8_t *v) { (void)d;polls++;*v=conv;return status_result; }
-HAL_StatusTypeDef TMAG3001_ReadDeviceStatus(TMAG3001_Handle_t *d,uint8_t *v) { (void)d;*v=devstatus;return device_result; }
+HAL_StatusTypeDef TMAG3001_ReadStatus(TMAG3001_Handle_t *d,uint8_t *v) { (void)d;polls++;if(status_result==HAL_OK)*v=conv;return status_result; }
+HAL_StatusTypeDef TMAG3001_ReadDeviceStatus(TMAG3001_Handle_t *d,uint8_t *v)
+{
+    (void)d;device_reads++;
+    if(device_fail_at && device_reads==device_fail_at) return device_fail_result;
+    if(device_result==HAL_OK) *v=devstatus;
+    return device_result;
+}
 static void complete(void)
 {
     if(dma_ptr) {
@@ -146,6 +164,8 @@ static void reset(int sensor_present)
     conv=1;devstatus=0x11;hse=1;scan_result=HAL_ERROR;
     init_result=config_result=register_result=trigger_result=sample_result=status_result=device_result=start_result=abort_result=HAL_OK;
     probes=inits=triggers=reads=polls=starts=aborts=frame_count=0;
+    diagnostic_writes=device_reads=device_fail_at=0;
+    persistent_int=fresh_conv=0;diagnostic_write_result=HAL_OK;device_fail_result=HAL_TIMEOUT;
     dma_ptr=NULL;auto_irq=complete_on_unlock=inside_dma=ownership_failures=0;
     stream.CR=0;dma.Instance=&stream;dma.State=HAL_DMA_STATE_READY;
     uart.hdmatx=&dma;uart.dmat=0;
@@ -154,6 +174,57 @@ static void reset(int sensor_present)
 static void boot(void) { App_Init(&uart,&i2c);drain(); }
 static void step(uint32_t ms) { tick+=ms;process();drain(); }
 static void sample_irq(void) { step(APP_SAMPLE_PERIOD_MS);App_OnSensorInt();process();drain(); }
+static void test_historical_int_recovery(void)
+{
+    reset(1);devstatus=0x14;conv=0xf3;fresh_conv=0x71;boot();
+    CHECK_EQ_U8(diagnostic_writes,1);
+    CHECK_EQ_U8(last_status()[10],0x10);CHECK_EQ_U8(last_status()[9],0xf3);
+    CHECK_EQ_U8(count_type(0x55),0);
+    auto_irq=1;step(APP_SAMPLE_PERIOD_MS);process();drain();
+    CHECK_EQ_U8(count_type(0x55),1);
+    CHECK(last_status()[4]&TMAG_FLAG_INT_PATH_OK,"fresh conversion proves INT recovery");
+    sample_irq();CHECK_EQ_U8(diagnostic_writes,1);
+    sample_result=HAL_TIMEOUT;sample_irq();sample_result=HAL_OK;devstatus=0x14;
+    step(APP_RETRY_MS);sample_irq();
+    CHECK_EQ_U8(diagnostic_writes,1);
+    CHECK_EQ_U8(count_error(TMAG_ERR_SENSOR_DIAG),2); /* reconnect plus fresh fault */
+    /* Only App_Init establishes a new recovery allowance. */
+    boot();CHECK_EQ_U8(diagnostic_writes,2);
+    for(unsigned fault=0;fault<3;fault++) {
+        reset(1);devstatus=fault==0 ? 0x14 : fault==1 ? 0x12 : 0x16;
+        persistent_int=1;conv=3;fresh_conv=1;boot();
+        CHECK_EQ_U8(diagnostic_writes,fault==0 ? 1 : 0);
+        CHECK_EQ_U8(count_error(TMAG_ERR_SENSOR_DIAG),1);
+        CHECK_EQ_U8(last_status()[10],devstatus);
+        if(fault==0) CHECK_EQ_U8(last_status()[9],3);
+        sample_irq();sample_irq();
+        CHECK_EQ_U8(count_type(0x55),0);
+        CHECK_EQ_U8(diagnostic_writes,fault==0 ? 1 : 0);
+    }
+    reset(1);devstatus=0x14;conv=3;boot();sample_irq();
+    CHECK_EQ_U8(count_type(0x55),0);
+    CHECK_EQ_U8(count_error(TMAG_ERR_SENSOR_DIAG),1);
+    reset(1);devstatus=0x10;boot();sample_irq();
+    CHECK_EQ_U8(diagnostic_writes,0);CHECK_EQ_U8(count_type(0x55),1);
+    /* Every recovery transaction failure preserves its bus error and gates ready. */
+    for(unsigned phase=0;phase<6;phase++) {
+        HAL_StatusTypeDef failure=phase<3 ? HAL_TIMEOUT : HAL_ERROR;
+        reset(1);devstatus=0x14;conv=3;
+        if(phase%3==0) diagnostic_write_result=failure;
+        else if(phase%3==1) {device_fail_at=2;device_fail_result=failure;}
+        else status_result=failure;
+        boot();
+        uint8_t expected=phase<3 ? TMAG_ERR_I2C_TIMEOUT : TMAG_ERR_I2C_READ;
+        CHECK_EQ_U8(diagnostic_writes,1);CHECK_EQ_U8(count_error(expected),1);
+        CHECK_EQ_U8(last_status()[10],phase%3==0 || phase%3==1 ? 0x14 : 0x10);
+        CHECK_EQ_U8(last_status()[9],0);
+        CHECK(!(last_status()[4]&(TMAG_FLAG_SENSOR_READY|TMAG_FLAG_CFG_OK)),"recovery timeout gates readiness");
+        CHECK_EQ_U8(count_error(TMAG_ERR_NONE),0);CHECK_EQ_U8(count_type(0x55),0);
+        diagnostic_write_result=status_result=HAL_OK;device_fail_at=0;devstatus=0x14;
+        step(APP_RETRY_MS);sample_irq();
+        CHECK_EQ_U8(diagnostic_writes,1);CHECK_EQ_U8(count_type(0x55),0);
+    }
+}
 static void test_i2c_trigger_status_flags(void)
 {
     /* INT signals completion; conversion starts via the I2C command. */
@@ -311,6 +382,7 @@ static void test_dma_timeout_recovery(void)
 }
 int main(void)
 {
+    test_historical_int_recovery();
     test_i2c_trigger_status_flags();test_absent_and_recovery();test_ids_and_faults();test_irq_and_samples();test_schedule();test_dma_failures_and_overflow();
     test_dma_timeout_recovery();
     for(unsigned i=0;i<frame_count;i++) CHECK_EQ_U8(tmag_crc8(frames[i]+2,9),frames[i][11]);

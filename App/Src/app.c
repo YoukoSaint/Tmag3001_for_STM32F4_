@@ -12,6 +12,7 @@ static uint8_t seq;
 static volatile uint8_t armed, irq_pending;
 static uint32_t armed_at, nominal_at, retry_at, heartbeat_at;
 static uint8_t last_flags;
+static uint8_t int_recovery_attempted;
 static uint8_t ring[APP_TX_RING_SIZE][TMAG_PROTO_FRAME_SIZE];
 /* count includes the DMA-owned tail: it may not be reused before completion. */
 static volatile unsigned head, tail, count;
@@ -149,6 +150,27 @@ static uint8_t init_error(HAL_StatusTypeDef initial)
     return lo != TMAG3001_MANUF_ID_LSB_VAL || hi != TMAG3001_MANUF_ID_MSB_VAL ||
            (id & 0x0cU) ? TMAG_ERR_SENSOR_ID : TMAG_ERR_I2C_READ;
 }
+static HAL_StatusTypeDef startup_diagnostics(uint8_t *failed_reg)
+{
+    HAL_StatusTypeDef result;
+    *failed_reg = TMAG3001_REG_DEVICE_STATUS;
+    result = TMAG3001_ReadDeviceStatus(&sensor, &health.device_status);
+    if (result != HAL_OK) return result;
+    /* INT_ER is historical and W1C. Never clear OTP_CRC_ER or write INT_RB.
+     * A failed attempt consumes this boot's allowance, including reconnects. */
+    if ((health.device_status & 0x06U) == 0x04U && !int_recovery_attempted) {
+        int_recovery_attempted = 1U;
+        result = TMAG3001_WriteRegister(&sensor, TMAG3001_REG_DEVICE_STATUS, 0x04U);
+        if (result != HAL_OK) return result;
+        result = TMAG3001_ReadDeviceStatus(&sensor, &health.device_status);
+        if (result != HAL_OK) return result;
+        *failed_reg = TMAG3001_REG_CONV_STATUS;
+        /* Preserve the actual summary, which may describe the previous
+         * conversion. Only collect_sample may establish fresh sample health. */
+        result = TMAG3001_ReadStatus(&sensor, &health.conv_status);
+    }
+    return result;
+}
 static void connect_sensor(void)
 {
     HAL_StatusTypeDef result = HAL_ERROR;
@@ -176,13 +198,15 @@ static void connect_sensor(void)
                 error_frame(result == HAL_TIMEOUT ? TMAG_ERR_I2C_TIMEOUT : TMAG_ERR_CONFIG_FAIL,
                             TMAG3001_REG_DEVICE_CONFIG_1);
             } else {
-                result = TMAG3001_ReadDeviceStatus(&sensor, &health.device_status);
+                uint8_t failed_reg;
+                result = startup_diagnostics(&failed_reg);
                 if (result != HAL_OK) {
-                    error_frame(bus_error(result), TMAG3001_REG_DEVICE_STATUS);
+                    error_frame(bus_error(result), failed_reg);
                 } else {
                     health.flags |= TMAG_FLAG_SENSOR_READY | TMAG_FLAG_CFG_OK;
                     nominal_at = HAL_GetTick();
-                    error_frame(TMAG_ERR_NONE, 0U);
+                    error_frame((health.device_status & 0x06U) ? TMAG_ERR_SENSOR_DIAG : TMAG_ERR_NONE,
+                                (health.device_status & 0x06U) ? TMAG3001_REG_DEVICE_STATUS : 0U);
                 }
             }
         }
@@ -229,6 +253,7 @@ void App_Init(UART_HandleTypeDef *uart, I2C_HandleTypeDef *i2c)
     tx_active = tx_recover = armed = irq_pending = 0U;
     seq = overflow_pending = tx_fault_seen = 0U;
     tx_recovery_wait = 0U;
+    int_recovery_attempted = 0U;
     health.range_code = APP_RANGE_CODE;
     health.sensitivity = tmag_sensitivity_for_range(APP_RANGE_CODE);
     health.sample_rate_hz = APP_SAMPLE_RATE_HZ;
