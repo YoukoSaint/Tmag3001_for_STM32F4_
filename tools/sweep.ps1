@@ -19,7 +19,6 @@ $repoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $configPath = Join-Path $repoRoot 'App/Inc/app_config.h'
 $rates = @(100, 200, 500, 1000)
 $utf8 = [Text.UTF8Encoding]::new($false, $true)
-$pattern = '(?m)^#define APP_SAMPLE_RATE_HZ ([0-9]+)U\r?$'
 $buildScript = Join-Path $PSScriptRoot 'build.ps1'
 $flashScript = Join-Path $PSScriptRoot 'flash.ps1'
 $captureScript = Join-Path $PSScriptRoot 'hosttest/test_capture.py'
@@ -53,6 +52,31 @@ function Assert-Capture($Capture, [int]$Rate) {
     }
 }
 
+function Read-SweepConfig([byte[]]$Bytes) {
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        throw 'Configuration must be UTF-8 without BOM.'
+    }
+    $text = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes)
+    foreach ($macro in @('APP_SAMPLE_RATE_HZ', 'APP_I2C_CLOCK_HZ', 'APP_UART_BAUD', 'APP_RANGE_CODE')) {
+        # Count all directive spellings before requiring the canonical baseline below.
+        # Horizontal C whitespace includes tabs; a macro-name boundary also counts function-like definitions.
+        $definitionPattern = '(?m)^[\t\x0B\x0C ]*#[\t\x0B\x0C ]*define[\t\x0B\x0C ]+' + [regex]::Escape($macro) + '\b'
+        if ([regex]::Matches($text, $definitionPattern).Count -ne 1) {
+            throw "Expected exactly one definition of $macro."
+        }
+    }
+    $rateMatches = [regex]::Matches($text, '(?m)^#define APP_SAMPLE_RATE_HZ ([0-9]+)U\r?$')
+    if ($rateMatches.Count -ne 1 -or $rateMatches[0].Groups[1].Value -ne '100') {
+        throw 'Expected exactly one #define APP_SAMPLE_RATE_HZ 100U baseline.'
+    }
+    foreach ($baseline in @('APP_I2C_CLOCK_HZ 100000U', 'APP_UART_BAUD 115200U', 'APP_RANGE_CODE 0U')) {
+        if ([regex]::Matches($text, '(?m)^#define ' + [regex]::Escape($baseline) + '\r?$').Count -ne 1) {
+            throw "Unexpected baseline: $baseline"
+        }
+    }
+    return @{ Text = $text; RateMatch = $rateMatches[0] }
+}
+
 function Invoke-Logged([string]$Label, [string]$Executable, [string[]]$Arguments) {
     $logPath = Join-Path $OutputRoot ($Label + '.log')
     $entry = [ordered]@{ label = $Label; executable = $Executable; arguments = $Arguments
@@ -74,16 +98,9 @@ try {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required file missing: $required" }
     }
     $originalBytes = [IO.File]::ReadAllBytes($configPath)
-    $originalText = $utf8.GetString($originalBytes)
-    $matches = [regex]::Matches($originalText, $pattern)
-    if ($matches.Count -ne 1 -or $matches[0].Groups[1].Value -ne '100') {
-        throw 'Expected exactly one #define APP_SAMPLE_RATE_HZ 100U baseline.'
-    }
-    foreach ($baseline in @('APP_I2C_CLOCK_HZ 100000U', 'APP_UART_BAUD 115200U', 'APP_RANGE_CODE 0U')) {
-        if ([regex]::Matches($originalText, '(?m)^#define ' + [regex]::Escape($baseline) + '\r?$').Count -ne 1) {
-            throw "Unexpected baseline: $baseline"
-        }
-    }
+    $config = Read-SweepConfig $originalBytes
+    $originalText = $config.Text
+    $matches = @($config.RateMatch)
     if (-not $OutputRoot) {
         $OutputRoot = Join-Path $repoRoot ('build/sample-rate-sweep/' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     }
