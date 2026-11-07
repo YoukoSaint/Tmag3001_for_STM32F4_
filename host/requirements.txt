@@ -1,0 +1,7 @@
+# 版本下限按本机实测环境填写
+PyQt5>=5.15,<6
+pyqtgraph>=0.13
+pyserial>=3.5
+numpy>=1.24
+psutil>=5.8
+pytest>=8.0
