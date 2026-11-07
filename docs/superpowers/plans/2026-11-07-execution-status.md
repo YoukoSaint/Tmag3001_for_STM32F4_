@@ -10,6 +10,8 @@
 
 A1追加严格证据：将提交b7eb1c4通过git archive导出到全新 `build/clean-checkout-audit-01/source/`，从空构建目录调用其tools/build.ps1 Release，31项编译/链接全部成功，无error；SDK仍取外部V1.28.3，没有拷贝HAL/CMSIS入库、没有烧录或打开串口。干净构建FLASH40560 B、RAM3016 B；与此前缓存构建大小不同，不声称二进制一致，且未用该产物替换用户正在测试的固件。
 
+干净构建差异已定因：CMAKE_C_FLAGS_RELEASE_INIT后追加CMake默认-O3 -DNDEBUG，而已实测缓存为-Os -g0。Release preset现显式固定CMAKE_C_FLAGS_RELEASE=-Os -g0，保持硬件已验证编译配置。全新 `build/clean-release-flags-02/` configure及31项编译/链接通过，FLASH36480/RAM3008；新旧ELF SHA256完全相同，均为63E3DAD540AB7647A2FD6ACDEEB4DB8E0FD6E7B1F953634DAE564305092773EE。仅离线验证，没有重新烧录或中断用户测试。
+
 抓包修复d2f3d3b已独立审阅、25项抓包测试通过；35秒真实抓包和修复后100/200档重测零缺口，取代下方“缺帧未解决”的当前判断，但保留旧报告作为历史。上位机已有真实曲线/CSV/日志联调证据；用户当前手动测试结果尚未报告。高频结果不再继续优化。物理拔线故障/CSV中断及EXE打包仍未完成实机验收，不把用户即将测试解释为已通过。后续可独立做文档/离线工作，需占用硬件的工作等待用户测试结束。
 
 分支 `codex/tmag-pipeline`，仅本地提交，未 push，实际提交顺序以 `git log` 为准。Plan A/B Task 与 spec 硬件验收 A1..A10 是两套编号。使用步骤及验收表见[README](../../../README.md)，线协议见[统一契约](../../protocol/TMAG3001_Protocol.md)。

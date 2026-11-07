@@ -20,7 +20,8 @@
       "name": "Release",
       "inherits": "default",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS_RELEASE": "-Os -g0"
       }
     }
   ],
