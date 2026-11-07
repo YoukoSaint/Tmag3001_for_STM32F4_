@@ -1,5 +1,8 @@
 # 交接文档：TMAG3001 × STM32F411 采集链路
 
+> **2026-11-07 执行前更正**：v1.2（0x12）仍为待实现草案。线协议唯一契约是 `docs/protocol/TMAG3001_Protocol.md`，进度见 `docs/superpowers/plans/2026-11-07-execution-status.md`。CRC8/crc8/tmag_crc8 是遗留命名，算法仅为字节 XOR。
+
+
 > **写给接手的主 agent。** 你没有产生本项目的任何对话历史，本文档 + 仓库内的三份设计/计划文档就是你的全部输入。
 > **本文件是交接入口，先读它，再读 spec，最后读计划。**
 
@@ -225,7 +228,7 @@ RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;   /* → 96 MHz SYSCLK */
 
 ---
 
-## 6. 协议 v1.2 速查（实现时的唯一契约）
+## 6. 协议 v1.2 草案速查（以 canonical 协议文档为准）
 
 ```
 所有帧 12 字节：[0]=0xAA  [1]=TYPE  [2]=SEQ  [3..10]=PAYLOAD  [11]=CRC8
@@ -238,9 +241,9 @@ CRC8 覆盖 [2..10]
   [3]=PROTO_VER=0x12
   [4]=FLAGS: bit0-1 RANGE(0=±40mT,1=±80mT,2=±120mT,3=±240mT)
             bit2 SENSOR_READY  bit3 CFG_OK
-            bit4 TRIGGER_INT(1=由INT触发)  bit5 INT_PATH_OK
-            bit6 CLK_SRC_HSE(1=晶振,0=回退内部RC)
-  [5..6]=SENS_LSB_PER_MT (uint16 BE)   [7]=SAMPLE_RATE_HZ
+            bit4 TRIGGER_INT(1=INT 作转换触发输入，非 data-ready 输出)  bit5 INT_PATH_OK
+            bit6 CLK_SRC_HSE(1=晶振,0=回退内部RC)  bit7 RATE_X10
+  [5..6]=SENS_LSB_PER_MT (uint16 BE)   [7]=ENCODED_RATE（bit7=0: Hz；bit7=1: 10 Hz）
   [8]=ERR_COUNT  [9]=CONV_STATUS原值  [10]=DEVICE_STATUS原值
 
 错误帧 TYPE=0xEE
@@ -251,13 +254,17 @@ CRC8 覆盖 [2..10]
         0x08 OVERFLOW  0x09 TX_OVERFLOW
 ```
 
-**三组跨语言 golden vector**（固件 C 与 PC 端 Python 必须给出相同字节）：
+**五组跨语言 golden vector**（固件 C 与 PC 端 Python 必须给出相同字节）：
 
 ```
 数据帧  seq=0x01 x=1496 y=44 z=-226 temp=17512
        AA 55 01 05 D8 00 2C FF 1E 44 68 3D
 状态帧  seq=0x42 ver=0x12 flags=0x2C sens=885 rate=100 errcnt=0 conv=0x01 dev=0
        AA 56 42 12 2C 03 75 64 00 01 00 6F
+状态帧  seq=0x42 rate=500（基础 flags=0x2C；线 flags=0xAC）
+       AA 56 42 12 AC 03 75 32 00 01 00 B9
+状态帧  seq=0x42 rate=1000（基础 flags=0x2C；线 flags=0xAC）
+       AA 56 42 12 AC 03 75 64 00 01 00 EF
 错误帧  seq=0x07 code=0x01 i2c=0x34 reg=0x0E
        AA EE 07 01 34 0E 00 00 00 00 00 3C
 ```
@@ -421,7 +428,7 @@ docs/superpowers/plans/<文件名> 的 Task N（贴出该 Task 的完整内容�
 ```
 1. cd F:\youko_repo\Tmag3001_for_STM32F4_
 2. git status                 # 确认工作区干净（有一个 build/ 探针目录属正常，.gitignore 会覆盖）
-3. git log --oneline -n 5     # 确认 HEAD = 6f71096
+3. git log --oneline -n 5     # 交接基础893bafd；当前HEAD见实际日志，勿按旧6f71096回退
 4. 读本文件 → 读 spec → 读 Plan A
 5. 加载 skill: superpowers:subagent-driven-development
 6. 派 Task 1 的子 agent（仓库骨架与 .gitignore），给出 7.3 模板化的 prompt
@@ -431,3 +438,7 @@ docs/superpowers/plans/<文件名> 的 Task N（贴出该 Task 的完整内容�
 **一个不要**：不要重新调查第 3 节的事实（工具链、datasheet、硬件）。都已实测确认，直接采信；把精力放在实现与审阅上。
 
 **另一个不要**：不要在没有跑通固件链路（T7）之前先写 PC 端的主窗口。协议参数（灵敏度、采样率、量程）要以实机状态帧为准。
+
+> 采样率统一补充：逻辑整数 0..255 直接编码；256..2550 仅精确 10 Hz 倍数可编码，其他值拒绝。0 表示未知/未配置。编码器从逻辑 Hz 重算并清/置 bit7，保留 bit6，由 range_code 重算 bits0-1。字段为名义配置 Hz，PC 以数据帧数/经过时间独立测实际 Hz。固件毫秒调度器更窄：`0 < rate <= 1000` 且 `1000 % rate == 0`，编译期拒绝其他配置；100/200/500/1000 Hz 可表示但尚未实测。SEQ 跨数据/状态/错误全部帧全局递增，丢帧检查覆盖全部有效帧。
+
+> Device_Status 更正（datasheet §7.1.29，PDF第57页）：bit4 INT_RB、bit2 INT_ER、bit1 OTP_CRC_ER、bit0 THR_Cross，没有 overflow 位。0x08 OVERFLOW 仅保留兼容编号，无已证实溢出条件不得发出；THR_Cross/INT_RB 不得当溢出。INT_ER/OTP_CRC_ER 映射 ERR_SENSOR_DIAG。Task5/6 必须读取并上报实际 Device_Status，不得始终发送初始化0；需驱动/应用测试验证。

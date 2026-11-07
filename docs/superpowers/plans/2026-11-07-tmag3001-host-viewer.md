@@ -1,5 +1,8 @@
 # TMAG3001 PC 端可视化应用 Implementation Plan
 
+> **2026-11-07 执行前更正**：v1.2（0x12）仍为待实现草案。线协议唯一契约是 `docs/protocol/TMAG3001_Protocol.md`，进度见 `docs/superpowers/plans/2026-11-07-execution-status.md`。CRC8/crc8/tmag_crc8 是遗留命名，算法仅为字节 XOR。
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 用 PyQt5 做一个实时磁力计可视化桌面应用，按 `UI_palette` 的架构思想（颜色角色单一真相源 + 主题面板 + 设置持久化）重构，按 `Logging_Standard_for_Agent` 的规范实现全部日志，并正确消费固件 v1.2 的 12 字节二进制协议。
@@ -15,12 +18,12 @@
 
 ## Global Constraints
 
-- **协议**：以固件计划的 `App/Inc/tmag_proto.h` 为唯一权威。三类帧统一 **12 字节**；`[0]=0xAA`；`[1]` 为 TYPE（`0x55` 数据 / `0x56` 状态 / `0xEE` 错误）；`[2]` 为 SEQ（0x00–0xFF 循环）；`[11]` 为 CRC-8（**初值 0x00、逐字节 XOR、无反射，覆盖字节 `[2..10]`**）。
+- **协议**：以 `docs/protocol/TMAG3001_Protocol.md` 为唯一线协议权威，固件头文件须与其一致。三类帧统一 **12 字节**；`[0]=0xAA`；`[1]` 为 TYPE（`0x55` 数据 / `0x56` 状态 / `0xEE` 错误）；`[2]` 为 SEQ（0x00–0xFF 循环）；`[11]` 为 CRC-8（**初值 0x00、逐字节 XOR、无反射，覆盖字节 `[2..10]`**）。
 - **量程与灵敏度**：PC 端**禁止硬编码** 446 或 885。灵敏度必须从状态帧的 `SENS` 字段读取；未收到状态帧前不显示数值曲线，只显示"等待状态帧"。
 - **时钟源可见性**：状态帧 `FLAGS` bit6 `CLK_SRC_HSE` 指示固件是否跑在 25 MHz 晶振上；为 0 时（已回退内部 RC）PC 端须在日志面板提示一次"时钟精度受限"。
 - **日志**：全部在 PC 端。严格遵循 `Logging_Standard_for_Agent`——模块级 `logging.getLogger(__name__)`、入口调用 `setup_logging()`、串口相关行带 `[transport=serial][addr=COM9@115200]`、每 30–60 s 一行 `HEALTH`、日志调用禁用 f-string、CSV 用 `tmp + os.replace` 原子写。
 - **UI 架构**：严格遵循 `UI_palette`——`ColorScheme` 用**类属性**（不是字典）作唯一真相源、`get_stylesheet()` 是**函数**（每次重读属性）、QSS 应用于 `QApplication.instance()` 而非 `QMainWindow`、pyqtgraph 画笔用 `hex_to_rgba()` 生成。
-- **黄金向量**：固件与 PC 端必须对同一组硬编码字节给出相同结果（见 Task B2 的三组 golden vector）。
+- **黄金向量**：固件与 PC 端必须对同一组硬编码字节给出相同结果（见 Task B2 的五组 golden vector）。
 - **运行环境**：Python 脚本**必须从仓库目录运行**，**禁止**在 `%TEMP%` 下运行脚本（该目录存在残留 `inspect.py` 等模块，会污染 stdlib 导入并触发 `ImportError: cannot import name 'currentframe'`）。
 - **不新增依赖**：只用已装的 PyQt5 / pyqtgraph / pyserial / numpy / psutil / pytest，**不得** `pip install` 新包。
 - **文件落位**：所有新文件位于 `F:\youko_repo\Tmag3001_for_STM32F4_\host\` 之内。
@@ -181,7 +184,7 @@ Python 脚本一律在仓库目录内运行（%TEMP% 有残留模块会污染 st
 ```python
 """协议层单元测试。
 
-三组 golden vector 与固件 C 实现（App/Src/tmag_proto.c）逐字节一致，
+五组 golden vector 与固件 C 实现（App/Src/tmag_proto.c）逐字节一致，
 是固件与 PC 端对齐的唯一保证。
 """
 from __future__ import annotations
@@ -196,11 +199,39 @@ from tmag_viewer import protocol as P
 # ── golden vectors（与固件 C 实现同源）──
 GOLDEN_DATA = bytes.fromhex("AA550105D8002CFF1E44683D")
 GOLDEN_STATUS = bytes.fromhex("AA5642122C0375640001006F")
-GOLDEN_ERROR = bytes.fromhex("AAEE0701340E0000000000003C")
+GOLDEN_ERROR = bytes.fromhex("AAEE0701340E00000000003C")
 
+
+GOLDEN_STATUS_500 = bytes.fromhex("AA564212AC037532000100B9")
+GOLDEN_STATUS_1000 = bytes.fromhex("AA564212AC037564000100EF")
+
+@pytest.mark.parametrize("rate,golden", [(500, GOLDEN_STATUS_500), (1000, GOLDEN_STATUS_1000)])
+def test_high_rate_golden(rate, golden):
+    out = P.encode_status(0x42, 0x2C, 0, 885, rate, 0, 1, 0)
+    assert out == golden
+    assert P.decode_frame(out).sample_rate_hz == rate
+
+@pytest.mark.parametrize("rate", [-1, 256, 257, 999, 2551, 1.5, 100.0, True, "100"])
+def test_reject_unrepresentable_rate(rate):
+    with pytest.raises(ValueError):
+        P.encode_status(0x42, 0x2C, 0, 885, rate, 0, 1, 0)
+
+@pytest.mark.parametrize("rate", [0, 1, 255, 260, 2550])
+def test_rate_boundaries(rate):
+    out = P.encode_status(0x42, 0xEC, 0, 885, rate, 0, 1, 0)
+    assert P.decode_frame(out).sample_rate_hz == rate
+    assert bool(out[4] & P.FLAG_RATE_X10) == (rate > 255)
+    assert out[4] & P.FLAG_CLK_SRC_HSE
+    assert out[11] == P.crc8(out[2:11])
+
+def test_unknown_status_version():
+    out = bytearray(GOLDEN_STATUS)
+    out[3] = 0x13
+    out[11] = P.crc8(out[2:11])
+    assert P.decode_frame(bytes(out)) is None
 
 def test_crc8_golden():
-    assert P.crc8(bytes.fromhex("0105D8002CFF1E")) == 0xB3
+    assert P.crc8(bytes.fromhex("0105D8002CFF1E")) == 0x11
     assert P.crc8(b"") == 0x00
     assert P.crc8(b"A") == 0x41
 
@@ -340,6 +371,7 @@ TYPE_STATUS = 0x56
 TYPE_ERROR = 0xEE
 
 # 状态帧 FLAGS 位
+FLAG_RATE_X10 = 1 << 7
 FLAG_RANGE_MASK = 0x03
 FLAG_SENSOR_READY = 1 << 2
 FLAG_CFG_OK = 1 << 3
@@ -467,16 +499,25 @@ def encode_status(
     conv_status: int,
     device_status: int,
 ) -> bytes:
-    """编码状态帧。"""
+    """编码名义配置 Hz；不可表示时拒绝，不截断。"""
+    if type(sample_rate_hz) is not int or not 0 <= sample_rate_hz <= 2550:
+        raise ValueError("sample rate must be an integer in 0..2550 Hz")
+    rate = sample_rate_hz
+    rate_flag = 0
+    if rate > 255:
+        if rate % 10:
+            raise ValueError("rates above 255 Hz must be exact multiples of 10")
+        rate //= 10
+        rate_flag = FLAG_RATE_X10
     f = bytearray(FRAME_SIZE)
     f[0] = SYNC
     f[1] = TYPE_STATUS
     f[2] = seq & 0xFF
     f[3] = PROTO_VERSION
-    f[4] = (flags & ~FLAG_RANGE_MASK) | (range_code & FLAG_RANGE_MASK)
+    f[4] = (flags & ~(FLAG_RANGE_MASK | FLAG_RATE_X10)) | (range_code & FLAG_RANGE_MASK) | rate_flag
     f[5] = (sensitivity >> 8) & 0xFF
     f[6] = sensitivity & 0xFF
-    f[7] = sample_rate_hz & 0xFF
+    f[7] = rate
     f[8] = err_count & 0xFF
     f[9] = conv_status & 0xFF
     f[10] = device_status & 0xFF
@@ -511,17 +552,19 @@ def decode_frame(frame: bytes) -> Optional[Frame]:
         return Frame(kind="data", seq=seq, x_raw=x, y_raw=y, z_raw=z, temp_raw=t)
 
     if frame[1] == TYPE_STATUS:
-        version, flags, sens_h, sens_l, rate, errcnt, conv, devst = struct.unpack(
+        version, flags, sensitivity, rate, errcnt, conv, devst = struct.unpack(
             ">BBHBBBB", frame[3:11]
         )
+        if version != PROTO_VERSION:
+            return None
         return Frame(
             kind="status",
             seq=seq,
             version=version,
             flags=flags,
             range_code=flags & FLAG_RANGE_MASK,
-            sensitivity=(sens_h << 8) | sens_l,
-            sample_rate_hz=rate,
+            sensitivity=sensitivity,
+            sample_rate_hz=rate * (10 if flags & FLAG_RATE_X10 else 1),
             err_count=errcnt,
             conv_status=conv,
             device_status=devst,
@@ -584,7 +627,7 @@ Expected: **12 passed**（12 个测试函数）。
 Run: `powershell -ExecutionPolicy Bypass -File F:\youko_repo\Tmag3001_for_STM32F4_\tools\hosttest\run_tests.ps1`
 Expected: `OK: N/N checks passed`。
 
-> **跨语言一致性是双向的**：Python 的三组 golden vector 是按固件 C 实现同样的规则手算的（CRC 为逐字节 XOR，可直接验算）。若后续有人改动固件的帧布局或 CRC 范围，**必须**同步更新 Python 侧的 golden vector，并在两边同时跑测试。
+> **跨语言一致性是双向的**：Python 的五组 golden vector 是按固件 C 实现同样的规则手算的（CRC 为逐字节 XOR，可直接验算）。若后续有人改动固件的帧布局或 CRC 范围，**必须**同步更新 Python 侧的 golden vector，并在两边同时跑测试。
 
 - [ ] **Step 6: 提交**
 
@@ -594,7 +637,7 @@ feat(host): 实现协议层并与固件 golden vector 对齐
 protocol.py：12 字节帧编解码 + CRC-8 + FrameStream 增量解析器，
 覆盖粘包/拆包/假同步头。零 Qt 依赖，可纯 pytest 测试。
 
-三组 golden vector 与固件 App/Src/tmag_proto.c 逐字节一致，
+五组 golden vector 与固件 App/Src/tmag_proto.c 逐字节一致，
 杜绝固件与 PC 端各自实现漂移。
 ```
 
@@ -2423,4 +2466,8 @@ spec 文件沿用旧 TMAGViewer.spec 的结构；本轮不执行打包
 - `CsvWriter.open/write/close` — B6 定义，B6 测试与 B8 使用 ✓
 - `SerialSource` 信号名 `sample_received/status_received/error_received/stats_updated` — B6 定义，B8 连接 ✓
 - `protocol.ERR_NONE/ERR_I2C_NACK`、`FLAG_SENSOR_READY/FLAG_CFG_OK/FLAG_INT_PATH_OK` — B2 定义，B8 使用 ✓
-- golden vector 三组在 B2 测试中硬编码，与固件 C 实现同一组字节 ✓
+- golden vector 五组在 B2 测试中硬编码，与固件 C 实现同一组字节 ✓
+
+> 采样率统一补充：逻辑整数 0..255 直接编码；256..2550 仅精确 10 Hz 倍数可编码，其他值拒绝。0 表示未知/未配置。编码器从逻辑 Hz 重算并清/置 bit7，保留 bit6，由 range_code 重算 bits0-1。字段为名义配置 Hz，PC 以数据帧数/经过时间独立测实际 Hz。固件毫秒调度器更窄：`0 < rate <= 1000` 且 `1000 % rate == 0`，编译期拒绝其他配置；100/200/500/1000 Hz 可表示但尚未实测。SEQ 跨数据/状态/错误全部帧全局递增，丢帧检查覆盖全部有效帧。
+
+> Device_Status 更正（datasheet §7.1.29，PDF第57页）：bit4 INT_RB、bit2 INT_ER、bit1 OTP_CRC_ER、bit0 THR_Cross，没有 overflow 位。0x08 OVERFLOW 仅保留兼容编号，无已证实溢出条件不得发出；THR_Cross/INT_RB 不得当溢出。INT_ER/OTP_CRC_ER 映射 ERR_SENSOR_DIAG。Task5/6 必须读取并上报实际 Device_Status，不得始终发送初始化0；需驱动/应用测试验证。

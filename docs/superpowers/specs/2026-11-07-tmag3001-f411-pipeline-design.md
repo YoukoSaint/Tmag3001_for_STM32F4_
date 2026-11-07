@@ -1,5 +1,8 @@
 # TMAG3001 × STM32F411 采集链路重构设计
 
+> **2026-11-07 执行前更正**：v1.2（0x12）仍为待实现草案。线协议唯一契约是 `docs/protocol/TMAG3001_Protocol.md`，进度见 `docs/superpowers/plans/2026-11-07-execution-status.md`。CRC8/crc8/tmag_crc8 是遗留命名，算法仅为字节 XOR。
+
+
 - 日期：2026-11-07
 - 状态：待用户评审
 - 工程根目录：`F:\youko_repo\Tmag3001_for_STM32F4_`
@@ -263,7 +266,7 @@ PLLSource = RCC_PLLSOURCE_HSI; PLLM = 8; PLLN = 96; PLLP = DIV2; PLLQ = 4;
         写 Device_Config_1（回写当前值，A/T=1）→ 触发转换
         armed = true; armed_at = now
 
-EXTI5_IRQHandler / HAL_GPIO_EXTI_Callback(PB5):
+EXTI9_5_IRQHandler / HAL_GPIO_EXTI_Callback(PB5):
         下降沿 → data_ready = true        ← 中断里只置标志，不做 I2C
 
 主循环（data_ready == true）:
@@ -273,7 +276,7 @@ EXTI5_IRQHandler / HAL_GPIO_EXTI_Callback(PB5):
               → 发错误帧 ERR_NO_CONV，并在状态帧标记 INT 路径失效
 ```
 
-- **采样率：编译期可配置，运行时由状态帧上报实测值。** 默认起点 100 Hz（10 ms/帧），
+- **采样率：编译期可配置，状态帧上报名义配置值；实际数据帧率由 PC 独立测量。** 默认起点 100 Hz（10 ms/帧），
   与协议文档 v1.1 和既有 PC 端预期一致；**上限在 P1 阶段扫频实测确定**（见 §5.3.1）。
 - 100 Hz × 12 B = 1200 B/s，占 115200 bps 的 **10.4%**，带宽充裕。
 - **INT 上拉：已确认外接 10 kΩ 到 3.3 V**（2026-11-07 用户确认）。
@@ -300,7 +303,7 @@ UART 背压）。首轮用 100 kHz I2C + 115200 UART；需要更高时再分别�
 
 ### 5.4 协议 v1.2
 
-三种帧，**统一 12 字节**，统一 CRC-8（多项式 0x07、初值 0x00、逐字节 XOR、无反射，覆盖字节 [2..10]）。
+三种帧，**统一 12 字节**，统一 CRC-8（初值 0x00、逐字节 XOR、无反射，覆盖字节 [2..10]）。
 
 ```
 数据帧 TYPE = 0x55
@@ -311,10 +314,10 @@ UART 背压）。首轮用 100 kHz I2C + 115200 UART；需要更高时再分别�
  [3]=PROTO_VER (0x12)
  [4]=FLAGS: bit0-1 RANGE(0=±40mT,1=±80mT,2=±120mT,3=±240mT)
           bit2 SENSOR_READY  bit3 CFG_OK
-          bit4 TRIGGER_SRC(0=I2C,1=INT)  bit5 INT_PATH_OK
-          bit6 CLK_SRC_HSE(1=晶振,0=已回退HSI)  bit7 保留
+          bit4 TRIGGER_INT(0=I2C 命令触发,1=INT 触发输入；不是 data-ready 来源)  bit5 INT_PATH_OK
+          bit6 CLK_SRC_HSE(1=晶振,0=已回退HSI)  bit7 RATE_X10
  [5..6]=SENS_LSB_PER_MT (uint16 BE)   ← 供 PC 端换算，修掉缺陷 B
- [7]=SAMPLE_RATE_HZ
+ [7]=ENCODED_RATE（bit7=0: Hz；bit7=1: 10 Hz）
  [8]=ERR_COUNT (累计 I2C 错误数)
  [9]=CONV_STATUS 原值
  [10]=DEVICE_STATUS 原值
@@ -337,7 +340,7 @@ UART 背压）。首轮用 100 kHz I2C + 115200 UART；需要更高时再分别�
 | 0x05 | `ERR_I2C_TIMEOUT` | I2C 事务超时 | 跳过本帧，继续 |
 | 0x06 | `ERR_NO_CONV` | 触发后超时未拿到 Result_Status | 跳过本帧；状态帧置 INT_PATH_OK=0 |
 | 0x07 | `ERR_SENSOR_DIAG` | `Conv_Status.Diag_Status` 置位（内部诊断失败） | 跳过本帧，继续 |
-| 0x08 | `ERR_OVERFLOW` | `Device_Status` 溢出位置位 | 跳过本帧，继续 |
+| 0x08 | `ERR_OVERFLOW` | 保留兼容码；无已证实溢出条件时不发出 | 跳过本帧，继续 |
 | 0x09 | `ERR_TX_OVERFLOW` | UART TX 队列溢出（丢帧） | 计数，PC 端可据此核对丢帧 |
 
 **状态帧发送策略**：初始化完成后立即发一次；之后每 **1 s** 发一次心跳；任何状态变化（就绪↔故障、量程变更）立即发。
@@ -345,7 +348,7 @@ UART 背压）。首轮用 100 kHz I2C + 115200 UART；需要更高时再分别�
 ### 5.5 工程管理约定
 
 - **`.ioc` 手工维护**：需补 PB5/EXTI5 与新引脚，但本项目**不执行 CubeMX "Generate Code"**（会重写 `main.c` 抹掉 `App/` 分层）。
-  → `.ioc` 同步更新 PB5（`GPIO_MODE_IT`、`GPIO_PULLUP`、`EXTI5`、NVIC `EXTI5_IRQn`），并**手工**在 `main.c` / `stm32f4xx_it.c` 写等价代码，两者必须一致。若将来要用 CubeMX 生成，先手工把 `main.c` 的业务代码迁到 `App/`。
+  → `.ioc` 同步更新 PB5（`GPIO_MODE_IT`、`GPIO_PULLUP`、`EXTI5`、NVIC `EXTI9_5_IRQn`），并**手工**在 `main.c` / `stm32f4xx_it.c` 写等价代码，两者必须一致。若将来要用 CubeMX 生成，先手工把 `main.c` 的业务代码迁到 `App/`。
 - **HAL/CMSIS 不入库**：CMake 从本机 CubeF4 包解析（§6.2）。
 
 ---
@@ -517,7 +520,7 @@ data/  *.csv
 | D1 | PB5 上拉 | **外接 10 kΩ 到 3.3 V**（已确认）；MCU 内部上拉兼底 |
 | D2 | ST-Link VCP 对应 UART | **USART1（PA9/PA10）**，与现有配置一致，不改引脚 |
 | D3 | 量程 | **±40 mT（TMAG3001A1，885 LSB/mT）** |
-| D4 | 采样率 | **上限实测确定**（见 §5.3.1）；默认起点 100 Hz，运行时可配置 |
+| D4 | 采样率 | **上限实测确定**（见 §5.3.1）；默认起点 100 Hz，编译期可配置 |
 | D5 | 板上 UI | **不做**；ST7789 代码保留在仓库但不参与构建 |
 | D6 | 日志归属 | **全在 PC 端**；固件只发规范状态码（§5.4 错误码表） |
 | D7 | Git 策略 | **先写好 .gitignore**，只提交关键代码；HAL/CMSIS 不入库（§6.3） |
@@ -532,3 +535,7 @@ data/  *.csv
 - 采样率上限与推荐默认工作点（§5.3.1 / A10）
 - 传感器实际接入后的连续丢帧率
 - `INT_PATH_OK` 是否为 1（PB5 中断路径是否真的走通，而非退化到轮询兜底）
+
+> 采样率统一补充：逻辑整数 0..255 直接编码；256..2550 仅精确 10 Hz 倍数可编码，其他值拒绝。0 表示未知/未配置。编码器从逻辑 Hz 重算并清/置 bit7，保留 bit6，由 range_code 重算 bits0-1。字段为名义配置 Hz，PC 以数据帧数/经过时间独立测实际 Hz。固件毫秒调度器更窄：`0 < rate <= 1000` 且 `1000 % rate == 0`，编译期拒绝其他配置；100/200/500/1000 Hz 可表示但尚未实测。SEQ 跨数据/状态/错误全部帧全局递增，丢帧检查覆盖全部有效帧。
+
+> Device_Status 更正（datasheet §7.1.29，PDF第57页）：bit4 INT_RB、bit2 INT_ER、bit1 OTP_CRC_ER、bit0 THR_Cross，没有 overflow 位。0x08 OVERFLOW 仅保留兼容编号，无已证实溢出条件不得发出；THR_Cross/INT_RB 不得当溢出。INT_ER/OTP_CRC_ER 映射 ERR_SENSOR_DIAG。Task5/6 必须读取并上报实际 Device_Status，不得始终发送初始化0；需驱动/应用测试验证。

@@ -1,5 +1,8 @@
 # TMAG3001 × STM32F411 固件采集链路 Implementation Plan
 
+> **2026-11-07 执行前更正**：v1.2（0x12）仍为待实现草案。线协议唯一契约是 `docs/protocol/TMAG3001_Protocol.md`，进度见 `docs/superpowers/plans/2026-11-07-execution-status.md`。CRC8/crc8/tmag_crc8 是遗留命名，算法仅为字节 XOR。
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 把仓库从"只有 5 个文件、连编译都做不了"改造成可构建、可烧录的 STM32F411 固件，实现 PB5/EXTI5 驱动的 TMAG3001 采集与 12 字节二进制协议输出，并实测出采样率上限。
@@ -23,7 +26,7 @@
 - **传感器工作配置**：`Operating_Mode=0`（待机/触发）、`Trigger_Mode=0`（I2C 命令位触发转换）、`INT_Mode=1`、`Result_INT=1`、`INT_State=0`（锁存）、`INT_POL_EN=1`、`MASK_INT=0`、`INTB_POL=0`（中断低有效）、`T_Rate=1`、`MAG_CH_EN=0x70`（X/Y/Z）、`X_Y_Range=0`、`Z_Range=0`、`Conv_AVG=0`、`CRC_EN=0`、`I2C_RD=0`。
 - **UART**：USART1（PA9/PA10）@ **115200 8N1**，DMA2_Stream7 发送；ST-Link VCP → **COM9**。
 - **时钟**：**HSE 25 MHz 晶振**（PH0/PH1）→ `PLLM=25 / PLLN=192 / PLLP=2 / PLLQ=4` → **SYSCLK 96 MHz**、APB1 48 MHz、APB2 96 MHz、FLASH_LATENCY_3、PWR VOS scale 1。**HSE 起振失败自动回退 HSI**（同为 96 MHz），经状态帧 `FLAGS` bit6 `CLK_SRC_HSE` 上报。**100 MHz 不可达**（PLLQ 凑不出 48 MHz，96 MHz 即本板上限）。**F411 的 `RCC_OscInitTypeDef` 没有 `HSEPredivValue` 字段（F42x/43x 才有），写它会编译失败。** 详见 spec §5.1.1。
-- **协议 v1.2**：三类帧**统一 12 字节**。`[0]=0xAA` 同步头；`[1]` 为 TYPE（`0x55` 数据 / `0x56` 状态 / `0xEE` 错误）；`[2]` 为 SEQ（0x00–0xFF 循环）；`[11]` 为 CRC-8。**CRC-8 = 初值 0x00、逐字节 XOR、无反射无反转，覆盖字节 `[2..10]` 共 9 字节**（等价于多项式 0x07 的 MPEG-2 写法）。
+- **协议 v1.2**：三类帧**统一 12 字节**。`[0]=0xAA` 同步头；`[1]` 为 TYPE（`0x55` 数据 / `0x56` 状态 / `0xEE` 错误）；`[2]` 为 SEQ（0x00–0xFF 循环）；`[11]` 为 CRC-8。**CRC-8 = 初值 0x00、逐字节 XOR、无反射无反转，覆盖字节 `[2..10]` 共 9 字节**（字节 XOR，不是多项式 CRC-8）。
 - **采样率**：编译期可配置，默认 **100 Hz**；**上限以 P1 扫频实测为准**（验收项 A10），不得凭猜测写死。
 - **固件职责边界**：固件**只发二进制帧**，不发任何文本日志。所有日志、诊断、可视化在 PC 端。
 - **HAL / CMSIS 不入库**：由 CMake 从本机 `STM32Cube_FW_F4_V1.28.3` 解析。**禁止**把 `Drivers/STM32F4xx_HAL_Driver/`、`Drivers/CMSIS/` 加入 git。
@@ -66,9 +69,9 @@
 | `CMakeLists.txt` | 重写：不再 `add_subdirectory(cmake/stm32cubemx)`，改为引入 `firmware_sources.cmake`；不加 ST7789 |
 | `CMakePresets.json` | 增加 `STM32CUBE_F4_PATH` cache 变量；保留 Ninja 生成器 |
 | `Core/Src/main.c` | 重写为薄壳：HAL/时钟/外设初始化 + `App_Init` + 主循环调 `App_Process`；**删除全部 LCD 与 ST7789 调用** |
-| `Core/Src/stm32f4xx_it.c` | 新增 `EXTI5_IRQHandler` → `HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_5)` |
+| `Core/Src/stm32f4xx_it.c` | 新增 `EXTI9_5_IRQHandler` → `HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_5)` |
 | `Core/Src/stm32f4xx_hal_msp.c` | USART1 TX DMA 保留；确认 `MX_GPIO_Init` 里 PB5 配 EXTI5 + 内部上拉 + NVIC 使能 |
-| `Core/Inc/main.h` | 新增 `INT1_Pin`（PB5）宏与 `EXTI5_IRQn` 相关声明 |
+| `Core/Inc/main.h` | 新增 `INT1_Pin`（PB5）宏与 `EXTI9_5_IRQn` 相关声明 |
 | `Drivers/Tmag3001/tmag3001_driver.c` / `.h` | 新增 INT 配置 API、I2C 触发写、9 字节批量读、量程→灵敏度映射；保留原 API 兼容 |
 
 ### 复制（源：`F:\Phd\GIT_YOUKOSAINT\TMA3001_`，**不复制 HAL/CMSIS**）
@@ -147,8 +150,7 @@ if (-not (Test-Path $src)) { throw "legacy source not found: $src" }
 $dirs = @(
     'Core',
     'Drivers\Tmag3001',
-    'Drivers\ST7789',
-    'cmake'
+    'Drivers\ST7789'
 )
 foreach ($d in $dirs) {
     $from = Join-Path $src $d
@@ -164,9 +166,12 @@ $files = @(
     'CMakePresets.json',
     'startup_stm32f411xe.s',
     'STM32F411XX_FLASH.ld',
-    'TMA3001_.ioc'
+    'TMA3001_.ioc',
+    'cmake\gcc-arm-none-eabi.cmake',
+    'cmake\starm-clang.cmake'
 )
 foreach ($f in $files) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent (Join-Path $dst $f)) | Out-Null
     Copy-Item -Path (Join-Path $src $f) -Destination (Join-Path $dst $f) -Force
     Write-Output "copied file $f"
 }
@@ -429,7 +434,7 @@ if (Test-Path $elf) {
 
 - [ ] **Step 5: 首次 configure + build（此时 App/ 还不存在，必须先造占位）**
 
-Task 2 的 CMakeLists 引用了 `App/Src/app.c` 与 `App/Src/tmag_proto.c`，而它们在 Task 4/6 才创建。为让 Task 2 可独立验证，先创建**最小占位**（后续任务会整体替换）：
+Task 2 的 CMakeLists 引用了 `App/Src/app.c` 与 `App/Src/tmag_proto.c`，而它们在 Task 4/6 才创建。为让 Task 2 可独立验证，先创建**最小占位**（后续任务会整体替换）。此步还须最小化移除遗产 main.c 的 ST7789/LCD include、调用及仅用于 UI 的 SPI 初始化，否则排除 ST7789 源后无法链接；完整应用重写仍在 Task 6，保留 Drivers/ST7789/：
 
 `App/Src/app.c`：
 ```c
@@ -645,7 +650,7 @@ run_tests.ps1 不依赖 make，直接调用 gcc。
 static void test_crc8(void)
 {
     const uint8_t v[7] = { 0x01, 0x05, 0xD8, 0x00, 0x2C, 0xFF, 0x1E };
-    CHECK_EQ_U8(tmag_crc8(v, sizeof(v)), 0xB3);   /* 文档 §7 给出的 CRC */
+    CHECK_EQ_U8(tmag_crc8(v, sizeof(v)), 0x11);   /* 独立 XOR 验算；遗产文档错误已更正 */
     CHECK_EQ_U8(tmag_crc8(v, 0), 0x00);
     CHECK_EQ_U8(tmag_crc8((const uint8_t *)"", 0), 0x00);
     CHECK_EQ_U8(tmag_crc8((const uint8_t *)"A", 1), 0x41);
@@ -785,7 +790,7 @@ typedef enum {
     TMAG_ERR_I2C_TIMEOUT = 0x05, /* I2C 事务超时 */
     TMAG_ERR_NO_CONV     = 0x06, /* 触发后超时未拿到 Result_Status */
     TMAG_ERR_SENSOR_DIAG = 0x07, /* Conv_Status.Diag_Status 置位 */
-    TMAG_ERR_OVERFLOW    = 0x08, /* Device_Status 溢出位置位 */
+    TMAG_ERR_OVERFLOW    = 0x08, /* 保留兼容码；无已证实条件时不发出 */
     TMAG_ERR_TX_OVERFLOW = 0x09  /* UART TX 队列溢出（丢帧） */
 } tmag_err_code_t;
 
@@ -795,6 +800,7 @@ typedef enum {
 #define TMAG_FLAG_CFG_OK       (1 << 3)
 #define TMAG_FLAG_TRIGGER_INT  (1 << 4) /* 1=由 INT 引脚触发转换 */
 #define TMAG_FLAG_INT_PATH_OK  (1 << 5) /* 1=EXTI 中断路径实际生效 */
+#define TMAG_FLAG_RATE_X10     (1 << 7) /* byte7 单位为 10 Hz */
 #define TMAG_FLAG_CLK_SRC_HSE  (1 << 6) /* 1=SYSCLK 来自 25MHz 晶振，0=已回退 HSI */
 
 /* ── 数据结构 ── */
@@ -809,7 +815,7 @@ typedef struct {
     uint8_t  flags;          /* 位域，bit0-1 由 range_code 填充 */
     uint8_t  range_code;     /* 0=±40mT 1=±80mT 2=±120mT 3=±240mT */
     uint16_t sensitivity;    /* LSB/mT */
-    uint8_t  sample_rate_hz;
+    uint16_t sample_rate_hz; /* 名义 Hz；0=未知/未配置 */
     uint32_t err_count;
     uint8_t  conv_status;
     uint8_t  device_status;
@@ -843,7 +849,7 @@ uint16_t tmag_sensitivity_for_range(uint8_t range_code);
 
 #include <string.h>
 
-/* CRC-8：初值 0x00，逐字节 XOR，无反射无反转（等价多项式 0x07 / MPEG-2） */
+/* CRC-8：初值 0x00，逐字节 XOR，无反射无反转（不是多项式 CRC-8） */
 uint8_t tmag_crc8(const uint8_t *data, size_t len)
 {
     uint8_t crc = 0x00;
@@ -890,12 +896,22 @@ size_t tmag_encode_data(uint8_t *out, uint8_t seq, const tmag_sample_t *s)
 size_t tmag_encode_status(uint8_t *out, uint8_t seq, const tmag_status_t *st)
 {
     uint8_t flags;
+    uint16_t rate;
+    uint8_t rate_flag = 0;
 
     if ((out == NULL) || (st == NULL)) {
         return 0;
     }
 
-    flags = (uint8_t)((st->flags & (uint8_t)~TMAG_FLAG_RANGE_MASK) |
+    /* Validate before modifying out. */
+    rate = st->sample_rate_hz;
+    if (rate > 255u) {
+        if ((rate > 2550u) || ((rate % 10u) != 0u)) { return 0; }
+        rate /= 10u;
+        rate_flag = TMAG_FLAG_RATE_X10;
+    }
+    flags = (uint8_t)((st->flags & (uint8_t)~(TMAG_FLAG_RANGE_MASK | TMAG_FLAG_RATE_X10)) |
+                      rate_flag |
                       (st->range_code & TMAG_FLAG_RANGE_MASK));
 
     out[0] = TMAG_PROTO_SYNC_BYTE;
@@ -905,7 +921,7 @@ size_t tmag_encode_status(uint8_t *out, uint8_t seq, const tmag_status_t *st)
     out[4] = flags;
     out[5] = (uint8_t)(st->sensitivity >> 8);
     out[6] = (uint8_t)(uint16_t)st->sensitivity;
-    out[7] = st->sample_rate_hz;
+    out[7] = (uint8_t)rate;
     out[8] = (uint8_t)(st->err_count & 0xFF);
     out[9] = st->conv_status;
     out[10] = st->device_status;
@@ -971,6 +987,8 @@ CRC-8 覆盖字节 [2..10]。状态帧下发量程与灵敏度（885/446/273/137
 ```
 
 ---
+
+> **Task 5 实施补充**：datasheet §6.5.1.1（本地 `F:\Phd\20260325_Tmag3001_test\tmag3001.pdf`，PDF 第 24 页）规定控制字节 bit7=T，低 7 位为寄存器指针。普通写 0x00 不触发转换；下方触发代码已改为控制字节 0x80。Init 不得把已扫描的 0x34..0x37 地址覆盖为默认 0x34；保留有效地址，默认路径须保持原调用兼容。增加 HAL mock 测试验证触发 control byte=0x80、cached config 数据不变，以及非默认扫描地址初始化后仍保留。
 
 ### Task 5: 传感器驱动升级（INT 配置 / 触发 / 批量读）
 
@@ -1126,7 +1144,10 @@ HAL_StatusTypeDef TMAG3001_TriggerConversion(TMAG3001_Handle_t *dev)
     if (dev == NULL) {
         return HAL_ERROR;
     }
-    return TMAG3001_WriteRegister(dev, TMAG3001_REG_DEVICE_CONFIG_1, dev->device_config_1);
+    /* Control byte T=1 (bit7), pointer=Device_Config_1 (low7 bits). */
+    return HAL_I2C_Mem_Write(dev->hi2c, (uint16_t)(dev->i2c_addr << 1),
+                            TMAG3001_REG_DEVICE_CONFIG_1 | 0x80u,
+                            I2C_MEMADD_SIZE_8BIT, &dev->device_config_1, 1, 100);
 }
 
 /*
@@ -1199,6 +1220,8 @@ feat(driver): TMAG3001 驱动支持 data-ready 中断与 I2C 触发转换
 
 ---
 
+> **Task 6 状态机代码片段已被以下要求取代，不能照抄执行**：增加显式 conversion-armed 状态；只在成功触发后置 armed 并记录独立转换超时，首次触发前/空闲期不得报 NO_CONV。完成读取或超时后清 armed。独立名义调度时间戳按周期递增，读样本后不得重置；忙时跳过过期槽并计数，不突发补发。INT_PATH_OK 初始为 0，只有 armed 转换收到 PB5 EXTI 且结果就绪后才置 1，超时清零。旧片段保留接口背景，Task 6 必须完整替换上述逻辑，并测试首次触发、延迟读取、超时、周期不漂移与 100/200/500/1000 Hz。
+
 ### Task 6: 固件应用层与 PB5/EXTI5 接入
 
 **Files:**
@@ -1206,7 +1229,7 @@ feat(driver): TMAG3001 驱动支持 data-ready 中断与 I2C 触发转换
 - Modify: `App/Inc/app_config.h`（新建）
 - Modify: `App/Src/app.c`（替换占位）
 - Modify: `Core/Src/main.c`（重写为薄壳）
-- Modify: `Core/Src/stm32f4xx_it.c`（加 `EXTI5_IRQHandler`）
+- Modify: `Core/Src/stm32f4xx_it.c`（加 `EXTI9_5_IRQHandler`）
 - Modify: `Core/Inc/main.h`（加 `INT1_Pin`）
 - Modify: `Core/Src/stm32f4xx_hal_msp.c` 或 `Core/Src/main.c` 的 `MX_GPIO_Init`（配 PB5 EXTI5 + 上拉 + NVIC）
 
@@ -1234,6 +1257,11 @@ feat(driver): TMAG3001 驱动支持 data-ready 中断与 I2C 触发转换
  * 改动此值后重新编译烧录即可做新一轮实测。
  */
 #define APP_SAMPLE_RATE_HZ          100U
+#if (APP_SAMPLE_RATE_HZ == 0U) || (APP_SAMPLE_RATE_HZ > 1000U)
+#error "APP_SAMPLE_RATE_HZ must be in 1..1000"
+#elif (1000U % APP_SAMPLE_RATE_HZ) != 0U
+#error "APP_SAMPLE_RATE_HZ must divide 1000 exactly"
+#endif
 #define APP_SAMPLE_PERIOD_MS        (1000U / APP_SAMPLE_RATE_HZ)
 
 /* ── 传感器 ── */
@@ -1424,7 +1452,7 @@ static void app_send_status(void)
     st.flags          = s_flags;
     st.range_code     = s_range_code;
     st.sensitivity    = s_sensitivity;
-    st.sample_rate_hz = (uint8_t)APP_SAMPLE_RATE_HZ;
+    st.sample_rate_hz = APP_SAMPLE_RATE_HZ;
     st.err_count      = s_err_count;
     st.conv_status    = s_conv_status;
     st.device_status  = s_device_status;
@@ -1720,8 +1748,8 @@ void SystemClock_Config(void)
   HAL_GPIO_Init(INT1_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init for EXTI5 */
-  HAL_NVIC_SetPriority(EXTI5_IRQn, 2, 0);
-  HAL_NVIC_EnableIRQ(EXTI5_IRQn);
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 2, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 ```
 
 `Core/Inc/main.h` 中新增：
@@ -1737,24 +1765,24 @@ void SystemClock_Config(void)
 /**
   * @brief This function handles EXTI line[5] interrupts.
   */
-void EXTI5_IRQHandler(void)
+void EXTI9_5_IRQHandler(void)
 {
-  /* USER CODE BEGIN EXTI5_IRQn 0 */
+  /* USER CODE BEGIN EXTI9_5_IRQn 0 */
 
-  /* USER CODE END EXTI5_IRQn 0 */
+  /* USER CODE END EXTI9_5_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(INT1_Pin);
-  /* USER CODE BEGIN EXTI5_IRQn 1 */
+  /* USER CODE BEGIN EXTI9_5_IRQn 1 */
 
-  /* USER CODE END EXTI5_IRQn 1 */
+  /* USER CODE END EXTI9_5_IRQn 1 */
 }
 ```
 
-同时确认 `Core/Src/stm32f4xx_it.c` 顶部已 `#include "main.h"`。
+同时确认 `Core/Src/stm32f4xx_it.c` 顶部已 `#include "main.h"`；必须修改 `Core/Inc/stm32f4xx_it.h` 声明 `void EXTI9_5_IRQHandler(void);`。PB5 对应 EXTI5 线，F411 使用 EXTI9_5 共享向量。
 
 - [ ] **Step 6: 编译验证**
 
 Run: `powershell -ExecutionPolicy Bypass -File F:\youko_repo\Tmag3001_for_STM32F4_\tools\build.ps1 Release`
-Expected: build 成功。`arm-none-eabi-size` 输出的 text 应显著小于 Task 2 的 129976（因为 ST7789 与 fonts 不再参与构建）。
+Expected: build 成功。`arm-none-eabi-size` 输出的 text 应显著小于 遗产实测基线 129976（Task 2 已排除 ST7789 与 fonts）。
 
 - [ ] **Step 7: 提交**
 
@@ -1763,7 +1791,7 @@ feat(app): 应用层采样状态机与 PB5/EXTI5 数据就绪中断
 
 - App/ 分为 app.h/app_config.h/app.c：初始化、采样状态机、EXTI 回调、帧调度
 - main.c 瘦身为薄壳，删除全部 LCD/ST7789/TIM2/文本输出
-- PB5 配 EXTI5 下降沿 + 内部上拉 + NVIC 使能；EXTI5_IRQHandler 已接
+- PB5 配 EXTI5 下降沿 + 内部上拉 + NVIC 使能；EXTI9_5_IRQHandler 已接
 - UART DMA 16 帧环形缓冲，溢出记 ERR_TX_OVERFLOW
 - 触发后 APP_INT_TIMEOUT_MS 内无 EXTI 则发 ERR_NO_CONV 并清 INT_PATH_OK 位
 ```
@@ -1880,10 +1908,13 @@ def parse_frame(frame: bytes):
         x, y, z, t = struct.unpack(">hhhh", frame[3:11])
         return ("data", seq, x, y, z, t)
     if frame[1] == TYPE_STATUS:
-        ver, flags, sens_h, sens_l, rate, errcnt, conv, devst = struct.unpack(
+        ver, flags, sensitivity, rate, errcnt, conv, devst = struct.unpack(
             ">BBHBBBB", frame[3:11]
         )
-        return ("status", seq, ver, flags, (sens_h << 8) | sens_l, rate, errcnt, conv, devst)
+        if ver != 0x12:
+            return None
+        rate *= 10 if flags & 0x80 else 1
+        return ("status", seq, ver, flags, sensitivity, rate, errcnt, conv, devst)
     code = frame[3]
     return ("error", seq, code, ERR_NAMES.get(code, f"UNKNOWN_0x{code:02X}"))
 
@@ -1930,12 +1961,13 @@ def main() -> int:
                     continue
                 del buf[:FRAME_SIZE]
                 counts[parsed[0]] += 1
+                # Global SEQ includes data, status and error frames.
+                if last_seq is not None:
+                    expected = (last_seq + 1) & 0xFF
+                    if parsed[1] != expected:
+                        dropped += (parsed[1] - expected) & 0xFF
+                last_seq = parsed[1]
                 if parsed[0] == "data":
-                    if last_seq is not None:
-                        expected = (last_seq + 1) & 0xFF
-                        if parsed[1] != expected:
-                            dropped += (parsed[1] - expected) & 0xFF
-                    last_seq = parsed[1]
                     if shown < 20:
                         print(
                             f"[seq {parsed[1]:3d}] x={parsed[2]:6d} y={parsed[3]:6d} "
@@ -1959,7 +1991,7 @@ def main() -> int:
                 print(
                     f"--- {now - start:5.1f}s  data={counts['data']} status={counts['status']} "
                     f"error={counts['error']} total={total} "
-                    f"rate={total / max(now - start, 1e-9):.1f}/s dropped={dropped}"
+                    f"rate={counts['data'] / max(now - start, 1e-9):.1f}Hz dropped={dropped}"
                 )
                 last_report = now
     finally:
@@ -2082,7 +2114,7 @@ perf(sweep): 采样率扫频实测并确定默认工作点
 ### Task 9: 协议文档与 README
 
 **Files:**
-- Create: `docs/protocol/TMAG3001_Protocol.md`
+- Update: `docs/protocol/TMAG3001_Protocol.md`（草案已提前建立；本任务补实现/硬件结果）
 - Create: `README.md`
 - Modify: `docs/superpowers/specs/2026-11-07-tmag3001-f411-pipeline-design.md`（§5.3.1 补实测结论）
 
@@ -2097,14 +2129,14 @@ perf(sweep): 采样率扫频实测并确定默认工作点
 1. **物理层**：USART1 @115200 8N1，无流控，DMA 发送；ST-Link VCP → COM9。
 2. **帧格式总览**：三类帧统一 12 字节；字节表（索引 / 字段 / 说明）。
 3. **数据帧 TYPE=0x55**：字段定义 + 大端 int16 + 灵敏度换算公式（`mT = raw / sensitivity`，sensitivity 由状态帧给出）。
-4. **状态帧 TYPE=0x56**：逐位说明 FLAGS（bit0-1 RANGE / bit2 SENSOR_READY / bit3 CFG_OK / bit4 TRIGGER_INT / bit5 INT_PATH_OK）、SENS、RATE、ERRCNT、CONV_STATUS、DEVICE_STATUS。
+4. **状态帧 TYPE=0x56**：逐位说明 FLAGS（bit0-1 RANGE / bit2 SENSOR_READY / bit3 CFG_OK / bit4 TRIGGER_INT / bit5 INT_PATH_OK / bit6 CLK_SRC_HSE / bit7 RATE_X10）、SENS、RATE、ERRCNT、CONV_STATUS、DEVICE_STATUS。
 5. **错误帧 TYPE=0xEE**：错误码表（0x00–0x09，逐个写宏名、触发条件、后果）。
-6. **CRC-8**：算法、覆盖范围 `[2..10]`、golden vector（`01 05 D8 00 2C FF 1E` → `0xB3`）。
+6. **CRC-8**：算法、覆盖范围 `[2..10]`、golden vector（`01 05 D8 00 2C FF 1E` → `0x11`）。
 7. **量程与灵敏度对照表**：885 / 446 / 273 / 137。
 8. **解析流程**：扫同步头 → 判 TYPE → 校验 CRC → 分发 → SEQ 检丢帧。
 9. **Python 解码参考实现**：与 `tools/hosttest/test_capture.py` 一致。
 10. **帧率**：填入 Task 8 的实测结论。
-11. **修订历史**：1.0 / 1.1（历史，F407 时代）/ **1.2（当前）**。
+11. **修订历史**：1.0 / 1.1（历史，F407 时代）/ **1.2（当前草案，待实现/验收）**。
 
 - [ ] **Step 2: 写 `README.md`**
 
@@ -2174,3 +2206,15 @@ docs: 补充协议 v1.2 正式文档与项目 README
 - `tmag_sensitivity_for_range()` — Task 4 定义，Task 6 调用 ✓
 - `tmag_encode_data/status/error` 返回 `size_t`，Task 6 比较 `== TMAG_PROTO_FRAME_SIZE` ✓
 - Task 6 中 `App_Init` 签名与 Task 2 占位版本（`void App_Init(void)`）不同 —— Task 6 会整体替换占位文件，已在 Task 6 Step 3 注明"替换占位" ✓
+
+> 采样率统一补充：逻辑整数 0..255 直接编码；256..2550 仅精确 10 Hz 倍数可编码，其他值拒绝。0 表示未知/未配置。编码器从逻辑 Hz 重算并清/置 bit7，保留 bit6，由 range_code 重算 bits0-1。字段为名义配置 Hz，PC 以数据帧数/经过时间独立测实际 Hz。固件毫秒调度器更窄：`0 < rate <= 1000` 且 `1000 % rate == 0`，编译期拒绝其他配置；100/200/500/1000 Hz 可表示但尚未实测。SEQ 跨数据/状态/错误全部帧全局递增，丢帧检查覆盖全部有效帧。
+
+### 补充的协议验收（Task 4 必须先实现，以下不是已通过记录）
+
+- C 单测完整比较 canonical 文档的五个 12 B golden；500/1000 Hz 的 byte7 分别为 50/100，flags 为 0xAC。
+- rate=0/1/255/260/2550 成功；256/257/999/2551/65535 返回 0，输出缓冲区事先填哨兵并确认逐字节未改变。
+- 预置 caller bit7，再编码 100 Hz 应清 bit7；预置 bit6 再编码 500 Hz 应保留 bit6、置 bit7；range bits 从 range_code 派生。每种情况独立核对 XOR。
+- 全部上述测试是待执行的实施要求，不代表当前固件已有编码器。
+- Task 6 UART DMA 队列代码仍需在实现时修正启动/完成中断竞态，确保 TX buffer 在 DMA 完成前不被覆盖，以可重复的队列/回调测试验收；不得照抄旧片段后宣称已验证。
+
+> Device_Status 更正（datasheet §7.1.29，PDF第57页）：bit4 INT_RB、bit2 INT_ER、bit1 OTP_CRC_ER、bit0 THR_Cross，没有 overflow 位。0x08 OVERFLOW 仅保留兼容编号，无已证实溢出条件不得发出；THR_Cross/INT_RB 不得当溢出。INT_ER/OTP_CRC_ER 映射 ERR_SENSOR_DIAG。Task5/6 必须读取并上报实际 Device_Status，不得始终发送初始化0；需驱动/应用测试验证。
