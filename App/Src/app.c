@@ -36,12 +36,14 @@ static void add_errors(uint32_t amount)
 
 static void tx_fault(void)
 {
+    uint32_t key = lock();
     uint32_t now = HAL_GetTick();
     if (!tx_fault_seen || (uint32_t)(now - tx_fault_at) >= APP_HEARTBEAT_MS) {
         add_errors(1U);
         tx_fault_seen = 1U;
         tx_fault_at = now;
     }
+    unlock(key);
 }
 /* Called with interrupts masked. HAL's DMA start does not wait for completion. */
 static void pump_locked(void)
