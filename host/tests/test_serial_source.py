@@ -139,6 +139,53 @@ def test_open_and_read_failure_signals_and_logs(source, caplog):
     assert "cannot open" in caplog.text and "read failed" in caplog.text
 
 
+def test_read_failure_handler_can_reopen_without_closing_replacement(source):
+    class CountedSerial(FakeSerial):
+        close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            super().close()
+
+    changes, errors, received = [], [], []
+    source.connection_changed.connect(changes.append)
+    source.sample_received.connect(received.append)
+    replacement = CountedSerial()
+    failed = CountedSerial([p.encode_data(40, 1, 2, 3, 4), OSError("read failed")])
+    ports = iter([failed, replacement])
+    source._serial_factory = lambda **kwargs: next(ports)
+
+    def reconnect(message):
+        errors.append(message)
+        assert source._worker is old_worker and not old_worker.isRunning()
+        assert source.open("REPLACEMENT")
+
+    source.transport_error.connect(reconnect)
+    assert source.open("FAILED")
+    old_worker = source._worker
+    wait_until(lambda: bool(errors))
+    assert changes == [True, False, True]
+    assert failed.closed
+    assert failed.close_calls == 1
+    assert source._worker is not None and source._worker.isRunning()
+    assert not replacement.closed
+    assert source.stats["frames"] == source.stats["samples"] == 0
+    assert source.stats["last_seq"] is None
+
+    received.clear()
+    replacement.chunks.append(p.encode_data(7, 5, 6, 7, 8))
+    wait_until(lambda: len(received) == 1)
+    assert received[0].seq == 7
+    assert source.stats["frames"] == source.stats["samples"] == 1
+    assert source.stats["dropped_frames"] == 0
+    replacement_worker = source._worker
+    source.close()
+    assert replacement.closed and not replacement_worker.isRunning()
+    assert failed.close_calls == replacement.close_calls == 1
+    assert source._worker is None
+    assert changes == [True, False, True, False]
+
+
 @pytest.mark.parametrize("port,baud", [("", 115200), (None, 115200), ("FAKE", 0), ("FAKE", True)])
 def test_invalid_parameters_never_open(source, port, baud):
     source._serial_factory = lambda **kwargs: pytest.fail("must not open")

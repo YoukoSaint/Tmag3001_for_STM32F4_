@@ -194,7 +194,9 @@ class SerialSource(QObject):
         worker = self._worker
         if worker is not None and not worker.isRunning() and worker.failure is not None:
             self.transport_error.emit(worker.failure)
-            self.close()
+            # A synchronous error handler may already have opened a new session.
+            if self._worker is worker:
+                self.close()
 
     def close(self) -> None:
         worker = self._worker
