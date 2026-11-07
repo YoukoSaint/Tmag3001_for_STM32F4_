@@ -333,7 +333,7 @@ def test_clock_src_hse_flag_roundtrip():
     f = P.decode_frame(frame)
     assert f is not None
     assert f.clock_from_hse is True
-    assert frame[4] == 0x2C | 0x40
+    assert frame[4] == 0x0C | 0x40
 
 
 def test_all_error_codes_have_names():
@@ -1532,13 +1532,13 @@ class SerialSource(QObject):
                     if frame is None:
                         continue
                     self._frames += 1
+                    if self._seq is not None:
+                        expected = (self._seq + 1) & 0xFF
+                        if frame.seq != expected:
+                            self._dropped += (frame.seq - expected) & 0xFF
+                    self._seq = frame.seq
                     if frame.kind == "data":
                         self._samples += 1
-                        if self._seq is not None:
-                            expected = (self._seq + 1) & 0xFF
-                            if frame.seq != expected:
-                                self._dropped += (frame.seq - expected) & 0xFF
-                        self._seq = frame.seq
                         self.sample_received.emit(frame)
                     elif frame.kind == "status":
                         self.status_received.emit(frame)
