@@ -29,12 +29,15 @@
 |---|---|
 | 路径 | `F:\youko_repo\Tmag3001_for_STM32F4_` |
 | remote | `https://github.com/YoukoSaint/Tmag3001_for_STM32F4_` |
-| 分支 | `master`（**无分支保护，本地提交未 push**） |
-| HEAD | `6f71096 docs(plan): 添加固件与 PC 端两份实施计划` |
+| 分支 | `codex/tmag-pipeline` —— 2026-11-07 由接手的 agent 从 `master` 切出并开始实施；`master` 已快进到同一 commit（`git branch -f master codex/tmag-pipeline`，纯 ref 更新，**不动工作区**） |
+| HEAD | `772dfed docs(spec,plan,handover): 按 25MHz HSE 晶振修正时钟树` |
+| 与远端 | `master` 比 `origin/master` **领先 5 个提交，全部未 push** |
 
 提交历史：
 
 ```
+772dfed  docs(spec,plan,handover): 按 25MHz HSE 晶振修正时钟树
+893bafd  docs: 添加交接文档，供新主 agent 接手实施
 6f71096  docs(plan): 添加固件与 PC 端两份实施计划
 102560c  docs(spec): fold in user decisions and add sample-rate ceiling analysis
 e770aff  docs: add F411 acquisition pipeline design spec
