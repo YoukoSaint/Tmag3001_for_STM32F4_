@@ -63,6 +63,8 @@ def main(argv=None, *, serial_factory=None, clock=time.monotonic):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", default="COM9")
     parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--read-size", type=int, default=4096,
+                        help="bytes requested per serial read (default: 4096)")
     parser.add_argument("--seconds", type=positive_seconds, default=10.0)
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--raw-out", type=Path,
@@ -75,13 +77,16 @@ def main(argv=None, *, serial_factory=None, clock=time.monotonic):
     args = parser.parse_args(argv)
     if args.baud <= 0:
         parser.error("baud must be positive")
+    if not 1 <= args.read_size <= 65536:
+        parser.error("read-size must be between 1 and 65536")
     if args.raw_out and args.json_out:
         if (args.raw_out.resolve() == args.json_out.resolve()
                 or (args.raw_out.exists() and args.json_out.exists()
                     and os.path.samefile(args.raw_out, args.json_out))):
             parser.error("raw and JSON output paths must be distinct")
     started = clock()
-    result = dict(port=args.port, baud=args.baud, requested_seconds=args.seconds,
+    result = dict(port=args.port, baud=args.baud, read_size=args.read_size,
+                  requested_seconds=args.seconds,
                   started_utc=datetime.now(timezone.utc).isoformat(),
                   valid_frames=0, data_frames=0, status_frames=0, error_frames=0,
                   error_none_frames=0, discarded_bytes=0, lost_frames=0,
@@ -119,7 +124,7 @@ def main(argv=None, *, serial_factory=None, clock=time.monotonic):
                 result["flush_duration_seconds"] = clock() - flush_started
         while clock() < started + args.seconds:
             serial_port.timeout = min(0.1, max(0.001, started + args.seconds - clock()))
-            chunk = serial_port.read(4096)
+            chunk = serial_port.read(args.read_size)
             result["read_bytes"] += len(chunk)
             if raw_file is not None:
                 remaining = memoryview(chunk)

@@ -30,12 +30,14 @@ class Serial:
         self.closed = False
         self.timeout = 0.1
         self.flush_count = 0
+        self.read_sizes = []
 
     def reset_input_buffer(self):
         self.flush_count += 1
         self.clock.now += 0.025
 
     def read(self, size):
+        self.read_sizes.append(size)
         self.clock.now += 0.1
         if self.fail:
             raise OSError("disconnected")
@@ -75,6 +77,17 @@ def test_fragmented_mixed_global_sequence_and_raw_records(tmp_path):
     assert out["data_records"][1]["after_status"] is True
     assert out["data_hz"] == pytest.approx(3 / out["elapsed_seconds"])
     assert all(record["crc_valid"] for record in out["records"])
+
+
+def test_read_size_experiment_is_explicit_and_validated(tmp_path):
+    p = load_capture().protocol
+    code, out, port = run([p.encode_status(0, 0, 0, 885, 100, 0, 1, 0x10)],
+                          tmp_path, "--read-size", "1")
+    assert code == 0 and out["read_size"] == 1
+    assert port.read_sizes and set(port.read_sizes) == {1}
+    for size in ["0", "-1", "65537"]:
+        with pytest.raises(SystemExit):
+            load_capture().main(["--read-size", size])
 
 
 @pytest.mark.parametrize("rate", [500, 1000])
