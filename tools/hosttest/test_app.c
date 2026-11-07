@@ -8,6 +8,10 @@
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *);
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *);
 static UART_HandleTypeDef uart, other;
+static DMA_Stream_TypeDef stream;
+static DMA_HandleTypeDef dma;
+static HAL_StatusTypeDef deinit_result, dma_init_result;
+static unsigned deinits, dma_inits;
 static I2C_HandleTypeDef i2c;
 static uint32_t tick, mask, read_delay;
 static uint8_t present, found_address, id_lo, id_hi, device_id, conv, devstatus, hse;
@@ -26,6 +30,7 @@ void mock_set_primask(uint32_t m)
     if (!m && complete_on_unlock && !inside_dma && dma_ptr) {
         complete_on_unlock=0;
         dma_ptr=NULL;
+        stream.CR=0;dma.State=HAL_DMA_STATE_READY;uart.dmat=0;
         HAL_UART_TxCpltCallback(&uart);
     }
 }
@@ -41,7 +46,9 @@ HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef *p,uint8_t *b,uint16_
     CHECK(p==&uart && n==12 && mask==1,"DMA start protected and correct UART");
     starts++;
     if (start_result!=HAL_OK) return start_result;
+    if (dma.State!=HAL_DMA_STATE_READY) return HAL_ERROR;
     CHECK(!dma_ptr,"never start a second DMA before completion/abort");
+    dma.State=HAL_DMA_STATE_BUSY;stream.CR=DMA_SxCR_EN;p->dmat=1;
     dma_ptr=b;
     memcpy(active_copy,b,12);
     if(frame_count<8192) memcpy(frames[frame_count++],b,12);
@@ -53,8 +60,30 @@ HAL_StatusTypeDef HAL_UART_AbortTransmit(UART_HandleTypeDef *p)
 {
     CHECK(p==&uart,"abort passed UART");
     aborts++;
-    if(abort_result==HAL_OK) dma_ptr=NULL;
+    if (!p->dmat) return HAL_OK; /* Cube clears DMAT before attempting DMA abort. */
+    p->dmat=0;
+    if(abort_result==HAL_TIMEOUT) dma.State=HAL_DMA_STATE_TIMEOUT;
+    else if(abort_result==HAL_OK) {
+        dma_ptr=NULL;stream.CR=0;dma.State=HAL_DMA_STATE_READY;
+    }
+    else p->dmat=1; /* Injected generic error is retryable in legacy tests. */
     return abort_result;
+}
+HAL_StatusTypeDef HAL_DMA_DeInit(DMA_HandleTypeDef *p)
+{
+    CHECK(p==&dma && !(stream.CR&DMA_SxCR_EN),"deinit only disabled TX stream");
+    deinits++;
+    if(deinit_result!=HAL_OK) return deinit_result;
+    p->State=HAL_DMA_STATE_RESET;dma_ptr=NULL;
+    return HAL_OK;
+}
+HAL_StatusTypeDef HAL_DMA_Init(DMA_HandleTypeDef *p)
+{
+    CHECK(p==&dma && !(stream.CR&DMA_SxCR_EN),"init only disabled TX stream");
+    dma_inits++;
+    /* HAL can return HAL_ERROR with State READY for invalid FIFO parameters. */
+    p->State=HAL_DMA_STATE_READY;
+    return dma_init_result;
 }
 uint8_t App_ClockFromHSE(void) { return hse; }
 HAL_StatusTypeDef TMAG3001_InitAtAddress(TMAG3001_Handle_t *d,I2C_HandleTypeDef *p,uint8_t a)
@@ -101,6 +130,7 @@ static void complete(void)
     if(dma_ptr) {
         if(memcmp(dma_ptr,active_copy,12)) ownership_failures++;
         dma_ptr=NULL;
+        stream.CR=0;dma.State=HAL_DMA_STATE_READY;uart.dmat=0;
         HAL_UART_TxCpltCallback(&uart);
     }
 }
@@ -117,6 +147,9 @@ static void reset(int sensor_present)
     init_result=config_result=register_result=trigger_result=sample_result=status_result=device_result=start_result=abort_result=HAL_OK;
     probes=inits=triggers=reads=polls=starts=aborts=frame_count=0;
     dma_ptr=NULL;auto_irq=complete_on_unlock=inside_dma=ownership_failures=0;
+    stream.CR=0;dma.Instance=&stream;dma.State=HAL_DMA_STATE_READY;
+    uart.hdmatx=&dma;uart.dmat=0;
+    deinit_result=dma_init_result=HAL_OK;deinits=dma_inits=0;
 }
 static void boot(void) { App_Init(&uart,&i2c);drain(); }
 static void step(uint32_t ms) { tick+=ms;process();drain(); }
@@ -190,7 +223,7 @@ static void test_dma_failures_and_overflow(void)
     reset(0);App_Init(&uart,&i2c);unsigned n=starts;HAL_UART_TxCpltCallback(&other);HAL_UART_ErrorCallback(&other);CHECK_EQ_U8(starts,n);
     HAL_UART_ErrorCallback(&uart);abort_result=HAL_ERROR;process();CHECK_EQ_U8(aborts,1);
     /* A late completion during abort recovery must not release the held slot. */
-    HAL_UART_TxCpltCallback(&uart);abort_result=HAL_OK;process();drain();CHECK_EQ_U8(frame_count,3);CHECK_EQ_U8(frames[0][2],frames[1][2]);
+    HAL_UART_TxCpltCallback(&uart);abort_result=HAL_OK;tick+=APP_INT_TIMEOUT_MS;process();drain();CHECK_EQ_U8(frame_count,3);CHECK_EQ_U8(frames[0][2],frames[1][2]);
     reset(0);App_Init(&uart,&i2c);complete_on_unlock=1;process();drain();CHECK_EQ_U8(frame_count,2);CHECK_EQ_U8(ownership_failures,0);
     reset(0);App_Init(&uart,&i2c);
     for(unsigned i=0;i<25;i++) {tick+=1000;process();}
@@ -203,9 +236,47 @@ static void test_dma_failures_and_overflow(void)
     process();drain();CHECK_EQ_U8(count_error(9),1);
     reset(0);mask=1;App_Init(&uart,&i2c);CHECK_EQ_U8(mask,1);mask=0;drain();
 }
+static void test_dma_timeout_recovery(void)
+{
+    reset(0);App_Init(&uart,&i2c);
+    uint8_t *held=dma_ptr;
+    HAL_UART_ErrorCallback(&other);process();CHECK_EQ_U8(aborts,0);
+    HAL_UART_ErrorCallback(&uart);abort_result=HAL_TIMEOUT;process();
+    CHECK(dma.State==HAL_DMA_STATE_TIMEOUT && !uart.dmat,"timeout leaves DMA poisoned with DMAT clear");
+    unsigned a=aborts;
+    process();CHECK_EQ_U8(aborts,a);
+    unsigned n=starts;
+    for(unsigned i=0;i<4;i++) {tick+=APP_INT_TIMEOUT_MS;process();HAL_UART_TxCpltCallback(&uart);}
+    CHECK_EQ_U8(deinits,0);CHECK_EQ_U8(starts,n);
+    CHECK(dma_ptr==held && !memcmp(held,active_copy,12),"enabled stream retains queue ownership");
+    stream.CR=0;tick+=APP_INT_TIMEOUT_MS;process();drain();
+    CHECK_EQ_U8(deinits,1);CHECK_EQ_U8(dma_inits,1);
+    CHECK_EQ_U8(frame_count,3);CHECK_EQ_U8(frames[0][2],frames[1][2]);
+    CHECK_EQ_U8(ownership_failures,0);
+    reset(0);App_Init(&uart,&i2c);HAL_UART_ErrorCallback(&uart);
+    abort_result=HAL_TIMEOUT;process();
+    for(unsigned i=0;i<25;i++) {tick+=APP_HEARTBEAT_MS;process();}
+    CHECK_EQ_U8(deinits,0);CHECK_EQ_U8(frame_count,1);
+    CHECK(dma_ptr && !memcmp(dma_ptr,active_copy,12),"overflow cannot overwrite timed-out DMA slot");
+    stream.CR=0;tick+=APP_INT_TIMEOUT_MS;process();drain();process();drain();
+    CHECK_EQ_U8(count_error(TMAG_ERR_TX_OVERFLOW),1);
+    CHECK_EQ_U8(ownership_failures,0);
+    for(unsigned phase=0;phase<2;phase++) {
+        reset(0);App_Init(&uart,&i2c);HAL_UART_ErrorCallback(&uart);
+        abort_result=HAL_TIMEOUT;process();stream.CR=0;
+        if(phase==0) deinit_result=HAL_ERROR;else dma_init_result=HAL_ERROR;
+        tick+=APP_INT_TIMEOUT_MS;process();n=starts;
+        CHECK_EQ_U8(frame_count,1);HAL_UART_TxCpltCallback(&uart);
+        process();CHECK_EQ_U8(starts,n); /* retries are rate limited */
+        deinit_result=dma_init_result=HAL_OK;tick+=APP_INT_TIMEOUT_MS;process();drain();
+        CHECK_EQ_U8(frame_count,3);CHECK_EQ_U8(frames[0][2],frames[1][2]);
+        CHECK_EQ_U8(ownership_failures,0);
+    }
+}
 int main(void)
 {
     test_absent_and_recovery();test_ids_and_faults();test_irq_and_samples();test_schedule();test_dma_failures_and_overflow();
+    test_dma_timeout_recovery();
     for(unsigned i=0;i<frame_count;i++) CHECK_EQ_U8(tmag_crc8(frames[i]+2,9),frames[i][11]);
     TEST_REPORT();
 }

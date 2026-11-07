@@ -18,6 +18,8 @@ static volatile unsigned head, tail, count;
 static volatile uint8_t tx_active, tx_recover;
 static uint8_t overflow_pending, tx_fault_seen;
 static uint32_t tx_fault_at;
+static uint8_t tx_recovery_wait;
+static uint32_t tx_recovery_at;
 
 static uint32_t lock(void)
 {
@@ -44,6 +46,31 @@ static void tx_fault(void)
         tx_fault_at = now;
     }
     unlock(key);
+}
+/* Foreground only. UART abort clears DMAT even if DMA abort times out, so a
+ * subsequent UART HAL_OK does not prove DMA is reusable. Keep queue ownership
+ * until the selected stream stops and its handle/configuration are restored.
+ * DeInit/Init preserve Init and Parent; the next UART transmit installs callbacks. */
+static void recover_tx(uint32_t now)
+{
+    DMA_HandleTypeDef *dma = tx_uart->hdmatx;
+    if (tx_recovery_wait && (uint32_t)(now - tx_recovery_at) < APP_INT_TIMEOUT_MS)
+        return;
+    tx_recovery_wait = 1U;
+    tx_recovery_at = now;
+    if (HAL_UART_AbortTransmit(tx_uart) != HAL_OK ||
+        (dma != NULL && ((dma->Instance->CR & DMA_SxCR_EN) != 0U ||
+         HAL_DMA_DeInit(dma) != HAL_OK || HAL_DMA_Init(dma) != HAL_OK ||
+         dma->State != HAL_DMA_STATE_READY ||
+         (dma->Instance->CR & DMA_SxCR_EN) != 0U))) {
+        tx_fault();
+        return;
+    }
+    {
+        uint32_t key = lock();
+        tx_active = tx_recover = tx_recovery_wait = 0U;
+        unlock(key);
+    }
 }
 /* Called with interrupts masked. HAL's DMA start does not wait for completion. */
 static void pump_locked(void)
@@ -201,6 +228,7 @@ void App_Init(UART_HandleTypeDef *uart, I2C_HandleTypeDef *i2c)
     head = tail = count = 0U;
     tx_active = tx_recover = armed = irq_pending = 0U;
     seq = overflow_pending = tx_fault_seen = 0U;
+    tx_recovery_wait = 0U;
     health.range_code = APP_RANGE_CODE;
     health.sensitivity = tmag_sensitivity_for_range(APP_RANGE_CODE);
     health.sample_rate_hz = APP_SAMPLE_RATE_HZ;
@@ -215,15 +243,7 @@ void App_OnSensorInt(void)
 void App_Process(void)
 {
     uint32_t now = HAL_GetTick();
-    if (tx_recover) {
-        /* Keep the tail owned until HAL confirms TX/DMA have stopped. Completion
-         * callbacks are ignored during recovery; the same queued frame retries. */
-        if (HAL_UART_AbortTransmit(tx_uart) == HAL_OK) {
-            uint32_t key = lock();
-            tx_active = tx_recover = 0U;
-            unlock(key);
-        } else tx_fault();
-    }
+    if (tx_recover) recover_tx(now);
     {
         uint32_t key = lock();
         pump_locked();
