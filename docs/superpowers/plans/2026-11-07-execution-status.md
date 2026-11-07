@@ -71,4 +71,6 @@ DeviceStatus bit4 INT_RB 是回读，bit2 INT_ER 为 W1C、bit1 OTP_CRC_ER 为�
 
 ## 原始字节后续分析
 
+新增单变量实测：`dotnet-reader-01.bin/.json`用System.IO.Ports.SerialPort读取同一COM9、115200，10.001秒1000 DATA、10状态、0 ERROR、0跳过字节、0 SEQ缺口。随后`fixed-timeout-01.bin/.json`仍运行原Python抓包/解析/写证据逻辑，仅用代理保持打开时timeout固定、不执行循环中的timeout赋值，得到999 DATA、10状态、0 ERROR、0跳过字节、0缺口（10.032秒）。本机pyserial源码表明timeout setter会调用_reconfigure_port，除超时外还执行SetCommState；每轮重配是当前主要嫌疑。代理实验尚非生产修复，下一步应去掉不必要的重复配置、增加回归测试并独立审查，再重复实测；不能把单次10秒通过宣称为长期无损验收。
+
 主agent对冷启动、64字节读取、4096字节读取对照逐个SEQ缺口提取相邻有效帧之间的原始片段，结果保存在本机 `build/hardware/read-boundary-forensics.json`。冷启动20处缺口均有3..11字节残片；64字节读取13处均有8..11字节残片；4096字节读取对照15处有1..11字节残片。因此这些观测不能仅用主机交付队列丢弃完整12字节帧来解释，损坏/截断已经存在于解析前读到的线流。64字节读取仍未消除截断，当前证据不能定位是MCU发出、物理线路还是VCP/驱动接收；也未记录每次read边界，不能仅凭这些偏移宣布与read边界有关。保持原生产读取配置，不作无证据的固件改动。
