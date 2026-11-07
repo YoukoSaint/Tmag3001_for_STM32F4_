@@ -24,6 +24,9 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    from tmag_viewer.color_scheme import ColorScheme
+
+    app.setStyleSheet(ColorScheme.get_stylesheet())
 
     from tmag_viewer.main_window import MainWindow
 

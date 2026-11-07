@@ -27,3 +27,4 @@ logs/
 *.log
 data/
 *.csv
+host/settings.json
