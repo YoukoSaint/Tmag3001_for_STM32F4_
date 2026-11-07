@@ -33,7 +33,7 @@ function(_cube_path_error path)
         "Drivers/CMSIS/Include/core_cm4.h. No files are copied into this repository.")
 endfunction()
 # Explicit invalid paths are errors, even when another SDK is available.
-if(STM32CUBE_F4_PATH)
+if(NOT "${STM32CUBE_F4_PATH}" STREQUAL "")
     file(TO_CMAKE_PATH "${STM32CUBE_F4_PATH}" _explicit_cube)
 elseif(DEFINED ENV{STM32CUBE_F4_PATH} AND NOT "$ENV{STM32CUBE_F4_PATH}" STREQUAL "")
     file(TO_CMAKE_PATH "$ENV{STM32CUBE_F4_PATH}" _explicit_cube)
