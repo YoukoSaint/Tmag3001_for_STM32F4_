@@ -1287,6 +1287,8 @@ tmp + os.replace 原子写（无临时文件残留）。
 
 ### Task B6: 串口采集线程
 
+> **B6 实施更正（优先于下方旧代码与接口示例）**：必须分别统计 `skipped_bytes`（FrameStream 重同步时丢弃的字节数）和 `dropped_frames`（所有有效数据/状态/错误帧的全局 SEQ 缺口）；两者单位不同，禁止相加。旧 `_dropped` 的混合累计不得照抄；状态栏和 HEALTH 的丢帧数必须取 `dropped_frames`。必须增加噪声/损坏帧测试：插入噪声但有效帧 SEQ 连续时，仅增加 `skipped_bytes`、丢帧为 0；一帧 12 B 损坏后由下一有效帧的 SEQ 检出缺口时，丢帧为 1，不得把跳过的 12 B 再计为 12 帧。
+
 **Files:**
 - Create: `host/tmag_viewer/serial_source.py`
 - Create: `host/tmag_viewer/csv_writer.py`
