@@ -232,7 +232,8 @@ void App_Init(UART_HandleTypeDef *uart, I2C_HandleTypeDef *i2c)
     health.range_code = APP_RANGE_CODE;
     health.sensitivity = tmag_sensitivity_for_range(APP_RANGE_CODE);
     health.sample_rate_hz = APP_SAMPLE_RATE_HZ;
-    health.flags = TMAG_FLAG_TRIGGER_INT | (App_ClockFromHSE() ? TMAG_FLAG_CLK_SRC_HSE : 0U);
+    /* Conversion is triggered by I2C; INT is a completion output. */
+    health.flags = App_ClockFromHSE() ? TMAG_FLAG_CLK_SRC_HSE : 0U;
     connect_sensor();
     status_frame();
 }

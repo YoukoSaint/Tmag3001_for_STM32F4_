@@ -154,6 +154,42 @@ static void reset(int sensor_present)
 static void boot(void) { App_Init(&uart,&i2c);drain(); }
 static void step(uint32_t ms) { tick+=ms;process();drain(); }
 static void sample_irq(void) { step(APP_SAMPLE_PERIOD_MS);App_OnSensorInt();process();drain(); }
+static void test_i2c_trigger_status_flags(void)
+{
+    /* INT signals completion; conversion starts via the I2C command. */
+    for(unsigned clock=0;clock<2;clock++) {
+        const uint8_t clock_flag=clock ? TMAG_FLAG_CLK_SRC_HSE : 0U;
+        const uint8_t ready_flags=clock_flag | TMAG_FLAG_SENSOR_READY | TMAG_FLAG_CFG_OK;
+        reset(0);hse=(uint8_t)clock;boot();
+        CHECK_EQ_U8(last_status()[4],clock_flag);
+        CHECK_EQ_U8(last_status()[7],100U);
+        step(APP_HEARTBEAT_MS);
+        CHECK_EQ_U8(last_status()[4],clock_flag);
+        present=1;step(APP_RETRY_MS);
+        CHECK_EQ_U8(last_status()[4],ready_flags);
+        CHECK_EQ_U8(last_status()[7],100U);
+        sample_irq();
+        CHECK_EQ_U8(reads,1);
+        CHECK_EQ_U8(last_status()[4],ready_flags | TMAG_FLAG_INT_PATH_OK);
+        step(APP_SAMPLE_PERIOD_MS);step(APP_INT_TIMEOUT_MS);
+        CHECK_EQ_U8(reads,2);
+        CHECK_EQ_U8(polls,1);
+        CHECK_EQ_U8(last_status()[4],ready_flags);
+        sample_result=HAL_TIMEOUT;sample_irq();
+        CHECK_EQ_U8(last_status()[4],clock_flag);
+        sample_result=HAL_OK;step(APP_RETRY_MS);
+        CHECK_EQ_U8(last_status()[4],ready_flags);
+        sample_irq();
+        CHECK_EQ_U8(last_status()[4],ready_flags | TMAG_FLAG_INT_PATH_OK);
+        for(unsigned i=0;i<frame_count;i++) if(frames[i][1]==0x56) {
+            CHECK(!(frames[i][4]&TMAG_FLAG_TRIGGER_INT),"I2C-triggered conversion never claims INT trigger input");
+            CHECK_EQ_U8(frames[i][4]&TMAG_FLAG_CLK_SRC_HSE,clock_flag);
+        }
+        reset(1);hse=(uint8_t)clock;boot();
+        CHECK_EQ_U8(last_status()[4],ready_flags);
+        CHECK_EQ_U8(last_status()[7],100U);
+    }
+}
 static void test_absent_and_recovery(void)
 {
     reset(0);boot();
@@ -275,7 +311,7 @@ static void test_dma_timeout_recovery(void)
 }
 int main(void)
 {
-    test_absent_and_recovery();test_ids_and_faults();test_irq_and_samples();test_schedule();test_dma_failures_and_overflow();
+    test_i2c_trigger_status_flags();test_absent_and_recovery();test_ids_and_faults();test_irq_and_samples();test_schedule();test_dma_failures_and_overflow();
     test_dma_timeout_recovery();
     for(unsigned i=0;i<frame_count;i++) CHECK_EQ_U8(tmag_crc8(frames[i]+2,9),frames[i][11]);
     TEST_REPORT();
