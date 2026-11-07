@@ -28,3 +28,4 @@ logs/
 data/
 *.csv
 host/settings.json
+/启动上位机.bat
