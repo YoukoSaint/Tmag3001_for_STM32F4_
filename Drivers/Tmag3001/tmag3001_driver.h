@@ -106,6 +106,8 @@ typedef struct {
     TMAG3001_MagneticRange range;
     TMAG3001_OperatingMode mode;
     TMAG3001_AveragingMode avg;
+    uint8_t device_config_1;      // Cached only after successful configuration
+    uint8_t config_valid;         // Acquisition configuration verified by readback
 } TMAG3001_Handle_t;
 
 typedef struct {
@@ -114,6 +116,10 @@ typedef struct {
     float z_mT;
     float temperature_C;
     uint8_t conv_status;
+    int16_t x_raw;
+    int16_t y_raw;
+    int16_t z_raw;
+    int16_t temp_raw;
 } TMAG3001_Data_t;
 
 typedef struct {
@@ -121,6 +127,7 @@ typedef struct {
     TMAG3001_OperatingMode mode;
     TMAG3001_AveragingMode avg;
     TMAG3001_ChannelEnable channels;
+    uint8_t enable_int;           // ConfigureForAcq only; legacy Configure ignores this field
 } TMAG3001_Config_t;
 
 /* ======================== Function Prototypes ======================== */
@@ -130,6 +137,13 @@ HAL_StatusTypeDef TMAG3001_Configure(TMAG3001_Handle_t *dev, TMAG3001_Config_t *
 HAL_StatusTypeDef TMAG3001_ReadMagData(TMAG3001_Handle_t *dev, TMAG3001_Data_t *data);
 HAL_StatusTypeDef TMAG3001_ReadAll(TMAG3001_Handle_t *dev, TMAG3001_Data_t *data);
 HAL_StatusTypeDef TMAG3001_ReadStatus(TMAG3001_Handle_t *dev, uint8_t *status);
+
+/* Acquisition: standby only, A1 ranges; configuration must pass readback. */
+HAL_StatusTypeDef TMAG3001_InitAtAddress(TMAG3001_Handle_t *dev, I2C_HandleTypeDef *hi2c, uint8_t addr);
+HAL_StatusTypeDef TMAG3001_ConfigureForAcq(TMAG3001_Handle_t *dev, const TMAG3001_Config_t *config);
+HAL_StatusTypeDef TMAG3001_TriggerConversion(TMAG3001_Handle_t *dev);
+HAL_StatusTypeDef TMAG3001_ReadSample(TMAG3001_Handle_t *dev, TMAG3001_Data_t *data);
+HAL_StatusTypeDef TMAG3001_ReadDeviceStatus(TMAG3001_Handle_t *dev, uint8_t *status);
 
 /* Low-level register access */
 HAL_StatusTypeDef TMAG3001_ReadRegister(TMAG3001_Handle_t *dev, uint8_t reg, uint8_t *data);
