@@ -17,6 +17,7 @@
 
 - **协议**：以固件计划的 `App/Inc/tmag_proto.h` 为唯一权威。三类帧统一 **12 字节**；`[0]=0xAA`；`[1]` 为 TYPE（`0x55` 数据 / `0x56` 状态 / `0xEE` 错误）；`[2]` 为 SEQ（0x00–0xFF 循环）；`[11]` 为 CRC-8（**初值 0x00、逐字节 XOR、无反射，覆盖字节 `[2..10]`**）。
 - **量程与灵敏度**：PC 端**禁止硬编码** 446 或 885。灵敏度必须从状态帧的 `SENS` 字段读取；未收到状态帧前不显示数值曲线，只显示"等待状态帧"。
+- **时钟源可见性**：状态帧 `FLAGS` bit6 `CLK_SRC_HSE` 指示固件是否跑在 25 MHz 晶振上；为 0 时（已回退内部 RC）PC 端须在日志面板提示一次"时钟精度受限"。
 - **日志**：全部在 PC 端。严格遵循 `Logging_Standard_for_Agent`——模块级 `logging.getLogger(__name__)`、入口调用 `setup_logging()`、串口相关行带 `[transport=serial][addr=COM9@115200]`、每 30–60 s 一行 `HEALTH`、日志调用禁用 f-string、CSV 用 `tmp + os.replace` 原子写。
 - **UI 架构**：严格遵循 `UI_palette`——`ColorScheme` 用**类属性**（不是字典）作唯一真相源、`get_stylesheet()` 是**函数**（每次重读属性）、QSS 应用于 `QApplication.instance()` 而非 `QMainWindow`、pyqtgraph 画笔用 `hex_to_rgba()` 生成。
 - **黄金向量**：固件与 PC 端必须对同一组硬编码字节给出相同结果（见 Task B2 的三组 golden vector）。
@@ -286,6 +287,24 @@ def test_sensitivity_lookup_table():
     assert P.SENSITIVITY_TABLE[3] == 137
 
 
+def test_clock_src_hse_flag_roundtrip():
+    """状态帧 bit6：1=晶振，0=回退内部 RC。"""
+    frame = P.encode_status(
+        seq=0x43,
+        flags=P.FLAG_SENSOR_READY | P.FLAG_CFG_OK | P.FLAG_CLK_SRC_HSE,
+        range_code=0,
+        sensitivity=885,
+        sample_rate_hz=100,
+        err_count=0,
+        conv_status=0x01,
+        device_status=0x00,
+    )
+    f = P.decode_frame(frame)
+    assert f is not None
+    assert f.clock_from_hse is True
+    assert frame[4] == 0x2C | 0x40
+
+
 def test_all_error_codes_have_names():
     assert set(P.ERR_NAMES) == set(range(0, 10))
 ```
@@ -326,6 +345,7 @@ FLAG_SENSOR_READY = 1 << 2
 FLAG_CFG_OK = 1 << 3
 FLAG_TRIGGER_INT = 1 << 4
 FLAG_INT_PATH_OK = 1 << 5
+FLAG_CLK_SRC_HSE = 1 << 6   # 1=SYSCLK 来自 25MHz 晶振，0=已回退内部 RC
 
 # 错误码 → 名称（与固件 tmag_err_code_t 一致）
 ERR_NAMES = {
@@ -395,6 +415,11 @@ class Frame:
     @property
     def int_path_ok(self) -> bool:
         return bool(self.flags & FLAG_INT_PATH_OK)
+
+    @property
+    def clock_from_hse(self) -> bool:
+        """True = 固件跑在 25MHz 晶振上；False = 已回退内部 RC（精度差）。"""
+        return bool(self.flags & FLAG_CLK_SRC_HSE)
 
     @property
     def range_name(self) -> str:
@@ -1846,6 +1871,7 @@ class MainWindow(QMainWindow):
         self._sample_rate_hz = 0
         self._t_start = time.monotonic()
         self._rss_prev = 0.0
+        self._warned_clock = False
 
         self._source = SerialSource(self)
         self._source.sample_received.connect(self._on_sample)
@@ -2024,6 +2050,11 @@ class MainWindow(QMainWindow):
         if not frame.int_path_ok:
             self._log_view.appendPlainText(
                 "[警告] 传感器 INT 中断路径未生效，已退化为轮询"
+            )
+        if not frame.clock_from_hse and not self._warned_clock:
+            self._warned_clock = True
+            self._log_view.appendPlainText(
+                "[警告] 固件未使用 25MHz 晶振（已回退内部 RC），时钟精度受限"
             )
 
     def _on_error(self, frame) -> None:

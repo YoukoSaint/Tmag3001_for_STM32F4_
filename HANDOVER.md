@@ -90,8 +90,42 @@ e770aff  docs: add F411 acquisition pipeline design spec
 | 目标芯片 | **STM32F411xC/E**（Device ID 0x431，512 KB Flash，Cortex-M4，3.24 V，Rev A） |
 | ST-Link 虚拟串口 | **COM9**（`STLink Virtual COM Port`，制造商 STMicroelectronics） |
 | 串口路由 | **USART1（PA9/PA10）@115200 8N1**（用户已确认） |
+| 高速时钟晶振 | **HSE 25 MHz**，接 **PH0 (OSC_IN) / PH1 (OSC_OUT)**（用户 2026-11-07 确认） |
 
 > `CLAUDE.md` 写的"串口在 COM3"是**错的**——COM3/COM7 是 Microsoft 虚拟口，COM9 才是 ST-Link VCP。
+
+### 3.2b 时钟树：遗产固件根本没在用晶振（必须改）
+
+**硬件**：板上 25 MHz HSE 晶振接在 **PH0 (OSC_IN) / PH1 (OSC_OUT)**。
+
+**遗产 `main.c` 的 `SystemClock_Config()` 虽然跑 96 MHz，用的却是内部 RC**：
+
+```c
+RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;   /* ← 内部 RC */
+RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;          /* ← PLL 源也是 HSI */
+RCC_OscInitStruct.PLL.PLLM = 8;    /* 16/8  = 2 MHz  VCO in */
+RCC_OscInitStruct.PLL.PLLN = 96;   /* 2×96  = 192 MHz VCO out */
+RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;   /* → 96 MHz SYSCLK */
+```
+
+`.ioc` 同样自相矛盾：声明 `RCC.HSE_VALUE=25000000` + PH0/PH1 为 HSE 引脚，PLL 参数却按 HSI 推（`PLLM=8`、`VCOInputFreq_Value=2000000` = 16/8）。**25/8 = 3.125 MHz 非整数 —— HSE 下这个 PLLM 根本锁不上 PLL。**
+
+**目标时钟树**（完整推导见 spec §5.1.1）：
+
+| 环节 | 值 |
+|---|---|
+| HSE | 25 MHz（PH0/PH1） |
+| PLLM / PLLN / PLLP / PLLQ | **25 / 192 / 2 / 4** → VCO in 1 MHz → VCO out 192 MHz → SYSCLK **96 MHz**；PLLQ 出 48 MHz |
+| APB1 / APB2 | 48 MHz / 96 MHz |
+| Flash / PWR | LATENCY 3 / VOS scale 1 |
+
+**100 MHz 不可达**：PLLM 只能是 25；100 MHz 需 PLLN=400（VCO 400 MHz）→ PLLQ 凑不出 48 MHz（400/8=50、400/10=40），破坏 F411 的 USB 约束。**96 MHz 即本板上限** —— 频率与现在相同，只是把源从内部 RC 换成晶振。
+
+**收益**：HSI 全范围 ±1% → 晶振 ±20–50 ppm。115200 波特率误差从 ±1152 bps 降到 ±6 bps，采样时基的长期稳定性同步改善。
+
+**回退**：HSE 起振失败 → 自动回退 HSI（`PLLM=8 / PLLN=96 / PLLP=2 / PLLQ=4`，同为 96 MHz），并由状态帧 `FLAGS` bit6 `CLK_SRC_HSE=0` 上报"正在用内部 RC"。
+
+**F411 没有 HSE 预分频器**：`RCC_OscInitTypeDef` 在 F411 上**没有 `HSEPredivValue` 字段**（F42x/43x 才有），写它直接编译失败。
 
 ### 3.3 TMAG3001 datasheet 结论（已逐页核对 81 页）
 
@@ -165,6 +199,7 @@ e770aff  docs: add F411 acquisition pipeline design spec
 | D9 | 工具链 | CMake 3.28.1 + Ninja + arm-none-eabi-gcc 14.3.1（CubeCLT）；烧录 STM32CubeProgrammer CLI 2.22.0 |
 | D10 | 执行模式 | **主 + 子 agent**（主 agent = 接手者，**不是本会话的 agent**） |
 | D11 | 交接方式 | **本交接文档**；实施由另一个主 agent 推进 |
+| D12 | 时钟源 | **改用 25 MHz HSE 晶振**（PH0/PH1）。`PLLM=25 / PLLN=192 / PLLP=2 / PLLQ=4` → SYSCLK 96 MHz、APB1 48 MHz、APB2 96 MHz、FLASH_LATENCY_3、VOS scale 1。HSE 起振失败自动回退 HSI（同为 96 MHz），状态帧 `FLAGS` bit6 `CLK_SRC_HSE` 上报。**100 MHz 不可达，96 MHz 即上限。** 详见 §3.2b |
 
 ---
 
@@ -201,6 +236,7 @@ CRC8 覆盖 [2..10]
   [4]=FLAGS: bit0-1 RANGE(0=±40mT,1=±80mT,2=±120mT,3=±240mT)
             bit2 SENSOR_READY  bit3 CFG_OK
             bit4 TRIGGER_INT(1=由INT触发)  bit5 INT_PATH_OK
+            bit6 CLK_SRC_HSE(1=晶振,0=回退内部RC)
   [5..6]=SENS_LSB_PER_MT (uint16 BE)   [7]=SAMPLE_RATE_HZ
   [8]=ERR_COUNT  [9]=CONV_STATUS原值  [10]=DEVICE_STATUS原值
 
@@ -330,6 +366,9 @@ docs/superpowers/plans/<文件名> 的 Task N（贴出该 Task 的完整内容�
 | T9 | 用 `Set-Content -Encoding UTF8` 改含中文的文件 | PS 5.1 写 BOM；某些组合会破坏中文源码 | 用 `write` 工具或 `WriteAllText` + `UTF8Encoding($false)` |
 | T10 | `ST7789` 误参与构建 | text 涨到 130 KB 且白跑 SPI 初始化 | CMake 源文件列表不含 ST7789；`main.c` 不调 `MX_SPI1_Init` |
 | T11 | 新增 `Drivers/ST7789` 到 git 之外误删 | 丢失用户已有工作 | 只"不参与构建"，**不删除** |
+| T12 | 沿用遗产的 `PLLM=8 / PLLN=96` 却把 PLL 源切到 HSE | 25/8 = 3.125 MHz 非整数 → PLL 锁不上 → `HAL_RCC_OscConfig` 超时 → 板子"死了" | 切 HSE 必须**同时**改 `PLLM=25 / PLLN=192`（见 §3.2b） |
+| T13 | 在 F411 上写 `RCC_OscInitStruct.HSEPredivValue = ...` | **编译失败** —— F411 没有这个字段（只有 F42x/43x 有） | 不写该字段；F411 的 HSE 无预分频器 |
+| T14 | HSE 起振失败时直接 `Error_Handler()` | 晶振虚焊/板型不符 → 板子完全无响应，连串口都没有 | 必须回退 HSI（同为 96 MHz）并用状态帧 bit6 上报；spec 风险 R7 |
 
 ---
 

@@ -22,6 +22,7 @@
 - **INT 引脚**：传感器 INT → **PB5 / EXTI5 下降沿**；**外接 10 kΩ 上拉到 3.3 V 已确认存在**；MCU 侧仍配置内部上拉兼底。
 - **传感器工作配置**：`Operating_Mode=0`（待机/触发）、`Trigger_Mode=0`（I2C 命令位触发转换）、`INT_Mode=1`、`Result_INT=1`、`INT_State=0`（锁存）、`INT_POL_EN=1`、`MASK_INT=0`、`INTB_POL=0`（中断低有效）、`T_Rate=1`、`MAG_CH_EN=0x70`（X/Y/Z）、`X_Y_Range=0`、`Z_Range=0`、`Conv_AVG=0`、`CRC_EN=0`、`I2C_RD=0`。
 - **UART**：USART1（PA9/PA10）@ **115200 8N1**，DMA2_Stream7 发送；ST-Link VCP → **COM9**。
+- **时钟**：**HSE 25 MHz 晶振**（PH0/PH1）→ `PLLM=25 / PLLN=192 / PLLP=2 / PLLQ=4` → **SYSCLK 96 MHz**、APB1 48 MHz、APB2 96 MHz、FLASH_LATENCY_3、PWR VOS scale 1。**HSE 起振失败自动回退 HSI**（同为 96 MHz），经状态帧 `FLAGS` bit6 `CLK_SRC_HSE` 上报。**100 MHz 不可达**（PLLQ 凑不出 48 MHz，96 MHz 即本板上限）。**F411 的 `RCC_OscInitTypeDef` 没有 `HSEPredivValue` 字段（F42x/43x 才有），写它会编译失败。** 详见 spec §5.1.1。
 - **协议 v1.2**：三类帧**统一 12 字节**。`[0]=0xAA` 同步头；`[1]` 为 TYPE（`0x55` 数据 / `0x56` 状态 / `0xEE` 错误）；`[2]` 为 SEQ（0x00–0xFF 循环）；`[11]` 为 CRC-8。**CRC-8 = 初值 0x00、逐字节 XOR、无反射无反转，覆盖字节 `[2..10]` 共 9 字节**（等价于多项式 0x07 的 MPEG-2 写法）。
 - **采样率**：编译期可配置，默认 **100 Hz**；**上限以 P1 扫频实测为准**（验收项 A10），不得凭猜测写死。
 - **固件职责边界**：固件**只发二进制帧**，不发任何文本日志。所有日志、诊断、可视化在 PC 端。
@@ -695,6 +696,12 @@ static void test_encode_status(void)
     CHECK_EQ_U8(f[9], 0x01);
     CHECK_EQ_U8(f[10], 0x00);
     CHECK_EQ_U8(f[11], tmag_crc8(&f[2], 9));
+
+    /* bit6 CLK_SRC_HSE：置位后应原样出现在 FLAGS 里 */
+    st.flags |= TMAG_FLAG_CLK_SRC_HSE;
+    tmag_encode_status(f, 0x43, &st);
+    CHECK_EQ_U8(f[4], 0x2C | 0x40);
+    CHECK_EQ_U8(f[11], tmag_crc8(&f[2], 9));
 }
 
 static void test_encode_error(void)
@@ -788,6 +795,7 @@ typedef enum {
 #define TMAG_FLAG_CFG_OK       (1 << 3)
 #define TMAG_FLAG_TRIGGER_INT  (1 << 4) /* 1=由 INT 引脚触发转换 */
 #define TMAG_FLAG_INT_PATH_OK  (1 << 5) /* 1=EXTI 中断路径实际生效 */
+#define TMAG_FLAG_CLK_SRC_HSE  (1 << 6) /* 1=SYSCLK 来自 25MHz 晶振，0=已回退 HSI */
 
 /* ── 数据结构 ── */
 typedef struct {
@@ -1208,7 +1216,8 @@ feat(driver): TMAG3001 驱动支持 data-ready 中断与 I2C 触发转换
   - `void App_Init(UART_HandleTypeDef *huart, I2C_HandleTypeDef *hi2c)`
   - `void App_Process(void)` —— 主循环调用
   - `void App_OnSensorInt(void)` —— EXTI 回调
-  - `app_config.h` 中的 `APP_SAMPLE_RATE_HZ` 宏（Task 9 扫频时改它重编）
+  - `uint8_t App_ClockFromHSE(void)` —— 1=晶振，0=回退内部 RC（在 `main.c` 定义）
+  - `app_config.h` 中的 `APP_SAMPLE_RATE_HZ` 宏（Task 8 扫频时改它重编）
 
 - [ ] **Step 1: 写 `App/Inc/app_config.h`**
 
@@ -1277,6 +1286,9 @@ void App_Process(void);
 
 /* EXTI5 (PB5) 下降沿回调：只置标志，不在中断里做 I2C */
 void App_OnSensorInt(void);
+
+/* 时钟源查询：1=SYSCLK 来自 25MHz 晶振，0=已回退内部 RC（在 main.c 里定义） */
+uint8_t App_ClockFromHSE(void);
 
 #ifdef __cplusplus
 }
@@ -1478,6 +1490,9 @@ void App_Init(UART_HandleTypeDef *huart, I2C_HandleTypeDef *hi2c)
 
     s_state = APP_STATE_READY;
     s_flags = TMAG_FLAG_SENSOR_READY | TMAG_FLAG_CFG_OK | TMAG_FLAG_INT_PATH_OK;
+    if (App_ClockFromHSE()) {
+        s_flags |= TMAG_FLAG_CLK_SRC_HSE;   /* 1=晶振，0=已回退内部 RC */
+    }
 
     app_send_error(TMAG_ERR_NONE, addr, 0x00);   /* 就绪信号 */
     app_send_status();
@@ -1586,7 +1601,85 @@ void App_Process(void)
 
 - [ ] **Step 4: 重写 `Core/Src/main.c` 为薄壳**
 
-保留 CubeMX 风格的时钟与外设初始化函数，但主函数瘦身为：
+**先改时钟树（关键，见 spec §5.1.1）**：遗产固件虽然跑 96 MHz，却用的是内部 RC（HSI），**完全没用板上的 25 MHz 晶振**；而 `.ioc` 一边声明 `RCC.HSE_VALUE=25000000` 与 PH0/PH1 为 HSE 引脚，一边配着按 HSI 推的 `PLLM=8`（25/8 = 3.125 MHz 非整数，HSE 下 PLL 锁不上）。
+
+把 `SystemClock_Config()` 换成下面这版 —— **HSE 优先，起振失败自动回退 HSI，两条路径都是 96 MHz**：
+
+```c
+/* 时钟：HSE 25 MHz 晶振(PH0/PH1) → 96 MHz；HSE 起振失败回退 HSI(同为 96 MHz)
+ *   HSE 路径：25/PLLM(25)=1MHz VCO in → PLLN(192)=192MHz VCO out
+ *             → PLLP(2)=96MHz SYSCLK，PLLQ(4)=48MHz
+ *   HSI 路径：16/PLLM(8)=2MHz VCO in → PLLN(96)=192MHz VCO out
+ *             → PLLP(2)=96MHz SYSCLK，PLLQ(4)=48MHz
+ * 注意：F411 的 HSE 没有预分频器，RCC_OscInitTypeDef 在 F411 上没有
+ *       HSEPredivValue 字段（F42x/43x 才有），写它会编译失败。
+ */
+static uint8_t s_clk_from_hse = 0;
+
+uint8_t App_ClockFromHSE(void)
+{
+    return s_clk_from_hse;
+}
+
+void SystemClock_Config(void)
+{
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                  RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;   /* PCLK1 = 48 MHz */
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;   /* PCLK2 = 96 MHz */
+
+    /* ① 优先用 25 MHz 晶振 */
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM = 25;
+    RCC_OscInitStruct.PLL.PLLN = 192;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = 4;
+
+    if ((HAL_RCC_OscConfig(&RCC_OscInitStruct) == HAL_OK) &&
+        (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) == HAL_OK)) {
+        s_clk_from_hse = 1;
+        return;
+    }
+
+    /* ② 晶振没起振 → 回退内部 RC（同样 96 MHz，只是精度差） */
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+    RCC_OscInitStruct.HSEState = RCC_HSE_OFF;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL.PLLM = 8;
+    RCC_OscInitStruct.PLL.PLLN = 96;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = 4;
+
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+        Error_Handler();
+    }
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK) {
+        Error_Handler();
+    }
+    s_clk_from_hse = 0;
+}
+```
+
+**同步修正 `.ioc` 的 RCC 标量**（`.ioc` 只作参考、不跑 Generate Code，但要让将来的再生成得到同样结果）：
+`RCC.PLLM=8` → `25`；`RCC.PLLN=96` → `192`；`RCC.VCOInputFreq_Value=2000000` → `1000000`；
+并补 `RCC.PLLSource=RCC_PLLSOURCE_HSE`（若该键不存在）。
+改完用 CubeIDE 1.19.0（`C:\ST\STM32CubeIDE_1.19.0`）的 CubeMX 打开确认能正常加载。
+
+**再把主函数瘦身为**：
 
 ```c
 /* USER CODE BEGIN Includes */

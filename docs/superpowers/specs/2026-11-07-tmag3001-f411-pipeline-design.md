@@ -175,6 +175,55 @@ Tmag3001_for_STM32F4_/
 └── .gitignore / README.md
 ```
 
+### 5.1.1 时钟树与时基（HSE 25 MHz 晶振）
+
+**硬件事实（2026-11-07 用户确认）**：板上高速时钟晶振为 **25 MHz**（HSE），接在 **PH0 (OSC_IN) / PH1 (OSC_OUT)**。
+
+**发现的缺陷**：本地遗产 `Core/Src/main.c` 的 `SystemClock_Config()` 虽然把系统做到了 96 MHz，但**完全没有使用晶振**：
+
+```c
+RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;   /* ← 内部 RC */
+RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;          /* ← PLL 源也是 HSI */
+RCC_OscInitStruct.PLL.PLLM = 8;    /* 16 / 8  = 2 MHz  VCO in */
+RCC_OscInitStruct.PLL.PLLN = 96;   /* 2 × 96  = 192 MHz VCO out */
+RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;   /* → 96 MHz SYSCLK */
+```
+
+`.ioc` 同样自相矛盾：声明了 `RCC.HSE_VALUE=25000000` 并把 PH0/PH1 配成 HSE 引脚，PLL 参数却是按 HSI 推的（`RCC.PLLM=8`、`RCC.VCOInputFreq_Value=2000000` = 16/8）。**25/8 = 3.125 MHz 不是整数，HSE 下这个 PLLM 根本无法工作** —— 一旦切到 HSE 而不改 PLLM/PLLN，PLL 会锁不上。
+
+**目标时钟树（改用晶振）**：
+
+| 环节 | 值 | 依据 |
+|---|---|---|
+| HSE | 25 MHz（PH0/PH1） | 硬件 |
+| PLLM | **25** → VCO in = 1 MHz | STM32F4 要求 f<sub>VCOIN</sub> ∈ [1, 2] MHz；25 的整数因子只有 1/5/25，取 25 得 1 MHz（取 5 得 5 MHz，超上限） |
+| PLLN | **192** → VCO out = 192 MHz | f<sub>VCOOUT</sub> ∈ [192, 432] MHz |
+| PLLP | 2 → **SYSCLK = 96 MHz** | F411 上限 100 MHz |
+| PLLQ | 4 → 48 MHz | F411 要求 VCO/PLLQ = 48 MHz 整 |
+| AHB | DIV1 → HCLK 96 MHz | |
+| APB1 | DIV2 → PCLK1 48 MHz | F411 APB1 上限 50 MHz |
+| APB2 | DIV1 → PCLK2 96 MHz | F411 APB2 上限 100 MHz |
+| TIM2 clk | 96 MHz（APB1 预分频≠1 → 定时器时钟 ×2） | |
+| Flash | LATENCY 3 | 2.7–3.6 V 下 90–100 MHz 需 3 个等待周期 |
+| PWR | VOS scale 1 | 96 MHz 的前提 |
+
+**为什么 100 MHz 不可达**：HSE 25 MHz 下 PLLM 只能是 25（VCO in 1 MHz）；要 100 MHz 需 PLLN=400 / PLLP=4 → VCO 400 MHz，但 PLLQ 凑不出 48 MHz（400/8=50、400/10=40），破坏 F411 的 USB 约束。**96 MHz 就是本板的上限** —— 与现在的频率相同，只是把源从内部 RC 换成晶振。
+
+**收益**：HSI 全范围频率误差 **±1%**，晶振 **±20–50 ppm**（视晶振规格）。直接改善 UART 波特率精度（115200 下从 ±1152 bps 降到 ±6 bps）与采样时基的长期稳定性 —— 对一台以时间序列采集为主的仪器，这是实质差别而非洁癖。
+
+**回退策略**：HSE 起振失败（晶体虚焊/停振）时 `HAL_RCC_OscConfig()` 返回 `HAL_TIMEOUT`。固件必须**自动回退到 HSI**，且回退配置同样得到 96 MHz：
+
+```c
+/* 回退：16 / PLLM(8) = 2 MHz VCO in × PLLN(96) = 192 MHz / PLLP(2) = 96 MHz */
+PLLSource = RCC_PLLSOURCE_HSI; PLLM = 8; PLLN = 96; PLLP = DIV2; PLLQ = 4;
+```
+
+回退发生时由状态帧 `FLAGS` 的 **bit6 `CLK_SRC_HSE`（1=晶振，0=回退 HSI）** 上报 PC 端。
+
+> **F411 的 HSE 没有预分频器**：`RCC_OscInitTypeDef` 在 F411 上**没有 `HSEPredivValue` 字段**（那是 F42x/43x 才有的），写它会直接编译失败。
+
+**时基**：采样周期与状态心跳都用 `HAL_GetTick()`（SysTick，1 ms）。SysTick 源为 HCLK，改用晶振后 tick 误差从 ±1% 降到 ±50 ppm。
+
 ### 5.2 传感器配置（依据 datasheet ZHCSR44C 逐位核对）
 
 | 寄存器 | 位 | 值 | 理由 |
@@ -263,7 +312,7 @@ UART 背压）。首轮用 100 kHz I2C + 115200 UART；需要更高时再分别�
  [4]=FLAGS: bit0-1 RANGE(0=±40mT,1=±80mT,2=±120mT,3=±240mT)
           bit2 SENSOR_READY  bit3 CFG_OK
           bit4 TRIGGER_SRC(0=I2C,1=INT)  bit5 INT_PATH_OK
-          bit6-7 保留
+          bit6 CLK_SRC_HSE(1=晶振,0=已回退HSI)  bit7 保留
  [5..6]=SENS_LSB_PER_MT (uint16 BE)   ← 供 PC 端换算，修掉缺陷 B
  [7]=SAMPLE_RATE_HZ
  [8]=ERR_COUNT (累计 I2C 错误数)
@@ -428,6 +477,8 @@ data/  *.csv
 | R4 | CubeCLT GCC 14.3.1 与原 CubeIDE 生成的代码有新版告警 | 可能编译失败 | `firmware_sources.cmake` 用 `-Wno-*` 精确豁免已知项，不整体关警告；不改动 CubeMX 生成的 HAL 胶水 |
 | R5 | 115200 下 100 Hz 帧 + 状态帧 | 带宽不足 | 实测占用 10.4%，充裕；必要时 UART 提到 921600 |
 | R6 | 量程/灵敏度在固件与 PC 端不一致（既有缺陷 B） | 数值全错 | 状态帧下发 SENS + RANGE，PC 端**不再硬编码** |
+| R7 | **HSE 晶振未起振**（虚焊/停振/板型不符） | `HAL_RCC_OscConfig` 返回 `HAL_TIMEOUT`，固件卡死在 `Error_Handler` | 自动回退 HSI（同为 96 MHz，见 §5.1.1）；状态帧 `FLAGS` bit6 `CLK_SRC_HSE=0` 上报"正在用内部 RC"，PC 端可见 |
+| R8 | 沿用遗产的 `PLLM=8/PLLN=96` 却切到 HSE | PLL 锁不上（25/8 非整数），系统跑不起来 | 切 HSE 必须同时改 `PLLM=25 / PLLN=192`（见 §5.1.1）；`.ioc` 的 RCC 标量同步修正 |
 
 ---
 
@@ -472,6 +523,9 @@ data/  *.csv
 | D7 | Git 策略 | **先写好 .gitignore**，只提交关键代码；HAL/CMSIS 不入库（§6.3） |
 | D8 | 工程根目录 | `F:\youko_repo\Tmag3001_for_STM32F4_`（不在 `youko_repo` 根目录新增文件） |
 | D9 | 工具链 | CMake 3.28.1 + Ninja + arm-none-eabi-gcc 14.3.1（CubeCLT）；烧录用 STM32CubeProgrammer CLI 2.22.0 |
+| D12 | 高速时钟晶振 | **25 MHz HSE，接 PH0/PH1**（2026-11-07 用户确认）。固件**改用晶振**：PLLM=25 / PLLN=192 / PLLP=2 / PLLQ=4 → SYSCLK 96 MHz、APB1 48 MHz、APB2 96 MHz；HSE 起振失败自动回退 HSI（同为 96 MHz），状态帧 `FLAGS` bit6 上报。**100 MHz 不可达（PLLQ 凑不出 48 MHz），96 MHz 即本板上限。** 详见 §5.1.1 |
+
+> 编号与 `HANDOVER.md` §4 保持一致：D1–D9 为技术决策，D10/D11 为执行与交接方式（记录在 HANDOVER 中，不属于本 spec 的技术内容），D12 为时钟源。
 
 **仍需实测确定（不阻塞设计，P1 阶段产出）**
 
