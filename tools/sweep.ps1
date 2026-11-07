@@ -39,7 +39,7 @@ $summary = [ordered]@{
     interpretation = 'Observed bounded tests only; the last successful rate is not a physical maximum. Sequence loss is modulo 256 across all frame kinds; status err_count is modulo 256.'
 }
 
-function Assert-Capture($Capture, [int]$Rate) {
+function Assert-Capture($Capture, [int]$Rate, [switch]$AllowTxOverflow) {
     if ($Capture.failure -or $Capture.data_frames -lt 1 -or $Capture.status_frames -lt 1) {
         throw 'Capture must contain status and DATA frames with no capture failure.'
     }
@@ -50,6 +50,48 @@ function Assert-Capture($Capture, [int]$Rate) {
         ($status.flags -band 12) -ne 12) {
         throw "Status does not confirm rate=$Rate, sensitivity=885, range=0, SENSOR_READY and CFG_OK."
     }
+    foreach ($field in @('device_status', 'conv_status')) {
+        $value = $status.$field
+        $parsed = 0L
+        if ($null -eq $value -or "$value" -notmatch '^[0-9]+$' -or
+            -not [long]::TryParse("$value", [ref]$parsed) -or $parsed -gt 255) {
+            throw "Status must contain a valid current $field byte."
+        }
+    }
+    # READY/CFG can remain set after a later sensor fault. INT_RB (0x10)
+    # and threshold crossing (0x01) are informational, not diagnostic faults.
+    if (($status.device_status -band 0x06) -ne 0 -or ($status.conv_status -band 0x02) -ne 0) {
+        throw 'Current sensor diagnostic fault in DeviceStatus or ConvStatus.'
+    }
+    foreach ($field in @('error_frames', 'error_none_frames')) {
+        $value = $Capture.$field
+        $parsed = 0L
+        if ($null -eq $value -or "$value" -notmatch '^[0-9]+$' -or
+            -not [long]::TryParse("$value", [ref]$parsed)) {
+            throw "Capture must contain a valid $field count."
+        }
+    }
+    $errorCount = 0L
+    $noneCount = 0L
+    foreach ($record in $Capture.records) {
+        if ($record.kind -ne 'error') { continue }
+        $code = 0L
+        if ($null -eq $record.err_code -or "$($record.err_code)" -notmatch '^[0-9]+$' -or
+            -not [long]::TryParse("$($record.err_code)", [ref]$code) -or $code -gt 255) {
+            throw 'ERROR record has no valid error code.'
+        }
+        if ($code -eq 0) { $noneCount++; continue }
+        $errorCount++
+        # Only the rate measurement permits UART backpressure. Keep its raw
+        # evidence in facts; validated means usable measurement, not zero loss.
+        if (-not ($AllowTxOverflow -and $code -eq 9)) {
+            throw "Capture contains fault ERROR code $code."
+        }
+    }
+    if ($errorCount -ne $Capture.error_frames -or $noneCount -ne $Capture.error_none_frames) {
+        throw 'ERROR record details do not match capture counts.'
+    }
+    # last_status.err_count is cumulative modulo 256, not current fault evidence.
 }
 
 function Read-SweepConfig([byte[]]$Bytes) {
@@ -176,7 +218,7 @@ try {
                 $result.facts = @{ read_failure = $_.Exception.Message }
             }
             if ($null -ne $captureCommandFailure) { throw $captureCommandFailure }
-            Assert-Capture $capture $rate
+            Assert-Capture $capture $rate -AllowTxOverflow
             $result.validated = $true
         }
         catch { $result.failure = $_.Exception.Message; throw }

@@ -83,7 +83,8 @@ if ($configFailures.Count) { throw "Preflight accepted $($configFailures.Count) 
 $validator = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-Capture' }, $true)
 . ([scriptblock]::Create($validator.Extent.Text))
 $fixture = [pscustomobject]@{ failure = $null; data_frames = 5; status_frames = 1
-    last_status = [pscustomobject]@{ kind = 'status'; sample_rate_hz = 100; sensitivity = 885; range_code = 0; flags = 12 } }
+    error_frames = 0; error_none_frames = 0; records = @()
+    last_status = [pscustomobject]@{ kind = 'status'; sample_rate_hz = 100; sensitivity = 885; range_code = 0; flags = 12; device_status = 0; conv_status = 0; err_count = 0 } }
 Assert-Capture $fixture 100
 $script:checks++
 foreach ($field in @('sample_rate_hz', 'sensitivity', 'range_code', 'flags')) {
@@ -110,6 +111,84 @@ $fixture.failure = 'I2C_NACK'
 $refused = $false
 try { Assert-Capture $fixture 100 } catch { $refused = $true }
 Check $refused 'Failed initial capture accepted.'
+$fixture.failure = $null
+
+# Current diagnostics and every ERROR in the captured evidence window matter,
+# even if earlier DATA exists and READY/CFG flags remain set.
+$faultFailures = [Collections.Generic.List[string]]::new()
+function Expect-CaptureRefused($Capture, [string]$Name, [switch]$AllowTxOverflow) {
+    $refused = $false
+    try { Assert-Capture $Capture 100 -AllowTxOverflow:$AllowTxOverflow } catch { $refused = $true }
+    if (-not $refused) { $faultFailures.Add($Name) }
+    $script:checks++
+}
+foreach ($rawFault in @(
+    @{ field = 'device_status'; value = 0x14 },
+    @{ field = 'device_status'; value = 0x02 },
+    @{ field = 'conv_status'; value = 0x02 })) {
+    $fixture.last_status.flags = 0x4C
+    $fixture.last_status.($rawFault.field) = $rawFault.value
+    Expect-CaptureRefused $fixture "Raw diagnostic $($rawFault.field)=$($rawFault.value)"
+    Expect-CaptureRefused $fixture "Per-rate raw diagnostic $($rawFault.field)" -AllowTxOverflow
+    $fixture.last_status.($rawFault.field) = 0
+}
+foreach ($code in @(1, 2, 3, 4, 5, 6, 7, 8, 10, 255)) {
+    $fixture.error_frames = 1
+    $fixture.records = @([pscustomobject]@{ kind = 'data' }, [pscustomobject]@{ kind = 'error'; err_code = $code })
+    Expect-CaptureRefused $fixture "Prior DATA then ERROR $code"
+    Expect-CaptureRefused $fixture "Per-rate ERROR $code" -AllowTxOverflow
+}
+$fixture.records = @()
+Expect-CaptureRefused $fixture 'Reported ERROR with missing details'
+$fixture.error_frames = 0
+$fixture.records = @([pscustomobject]@{ kind = 'error'; err_code = 9 })
+Expect-CaptureRefused $fixture 'ERROR details/count mismatch' -AllowTxOverflow
+$fixture.error_frames = 1
+Expect-CaptureRefused $fixture 'Initial ERROR TX_OVERFLOW'
+$fixture.records = @([pscustomobject]@{ kind = 'error' })
+Expect-CaptureRefused $fixture 'ERROR missing code' -AllowTxOverflow
+$fixture.records = @()
+$fixture.error_frames = $null
+Expect-CaptureRefused $fixture 'Missing ERROR count'
+$fixture.error_frames = 0
+$fixture.error_none_frames = 1
+Expect-CaptureRefused $fixture 'Reported ERR_NONE with missing details'
+$fixture.error_none_frames = 0
+$fixture.last_status.device_status = $null
+Expect-CaptureRefused $fixture 'Missing current DeviceStatus'
+$fixture.last_status.device_status = 0
+$fixture.last_status.conv_status = $null
+Expect-CaptureRefused $fixture 'Missing current ConvStatus'
+$fixture.last_status.conv_status = 0
+if ($faultFailures.Count) { throw "Capture gate accepted $($faultFailures.Count) unsafe fixtures: $($faultFailures -join ', ')" }
+
+$fixture.last_status.device_status = 0x10 # INT_RB alone is healthy.
+$fixture.last_status.conv_status = 0x01 # Threshold crossing alone is healthy.
+$fixture.last_status.err_count = 157 # Cumulative/modulo history is not a current fault.
+Assert-Capture $fixture 100
+$script:checks++
+$fixture.records = @([pscustomobject]@{ kind = 'error'; err_code = 0 })
+$fixture.error_none_frames = 1
+Assert-Capture $fixture 100
+$script:checks++
+$fixture.records += [pscustomobject]@{ kind = 'error'; err_code = 9 }
+$fixture.error_frames = 1
+$fixture | Add-Member -NotePropertyName lost_frames -NotePropertyValue 3
+$fixture | Add-Member -NotePropertyName discarded_bytes -NotePropertyValue 5
+$fixtureBefore = $fixture | ConvertTo-Json -Depth 10 -Compress
+Assert-Capture $fixture 100 -AllowTxOverflow
+Check (($fixture | ConvertTo-Json -Depth 10 -Compress) -ceq $fixtureBefore) 'Per-rate validation changed overflow/loss evidence.'
+$initialGate = $ast.Find({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.Extent.Text -eq 'Assert-Capture $initial 100' }, $true)
+Check ($null -ne $initialGate) 'Initial capture must use strict validation.'
+Check ($source.Contains('Assert-Capture $capture $rate -AllowTxOverflow')) 'Only per-rate validation should opt into overflow measurement.'
+Check ($source.Contains('error_frames = $capture.error_frames') -and $source.Contains('raw_error_codes = @($capture.records')) 'Summary must retain overflow count and codes.'
+Check (-not $source.Contains('zero_loss = $true')) 'Validation must not claim zero loss.'
+$hardwareCapturePath = Join-Path $repoRoot 'build/hardware/t7-postflag.json'
+if (Test-Path -LiteralPath $hardwareCapturePath -PathType Leaf) {
+    $hardwareCapture = Get-Content -LiteralPath $hardwareCapturePath -Raw | ConvertFrom-Json
+    Expect-CaptureRefused $hardwareCapture 'Actual postflag capture'
+    if ($faultFailures.Count) { throw ($faultFailures -join ', ') }
+}
 Check ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -ceq $before) 'Safe fixtures changed configuration bytes.'
 Check (-not (Test-Path -LiteralPath $testOutput)) 'Safe fixtures created sweep output.'
 Write-Host "PASS: $script:checks sweep safety/plan checks; no hardware or build executed."
