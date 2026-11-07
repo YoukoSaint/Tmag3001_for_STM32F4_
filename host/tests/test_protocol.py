@@ -151,6 +151,26 @@ def test_unknown_status_version_rejected_even_with_valid_checksum():
     assert p.decode_frame(repair_checksum(wire)) is None
 
 
+@pytest.mark.parametrize("reserved_index", range(6, 11))
+def test_error_reserved_bytes_rejected_even_with_repaired_checksum(reserved_index):
+    wire = bytearray(ERROR)
+    wire[reserved_index] = 0xAA
+    assert p.decode_frame(repair_checksum(wire)) is None
+
+
+@pytest.mark.parametrize("split", range(23))
+def test_constructed_adjacency_from_actual_error_vectors_recovers(split):
+    # The vectors were observed separately; their adjacency here is synthetic.
+    bad = bytes.fromhex("aaee6b07341c00000000aaee")
+    following = bytes.fromhex("aaeed307341c0000000000fc")
+    wire = bad + following[2:]
+    stream = p.FrameStream()
+    events = stream.feed(wire[:split]) + stream.feed(wire[split:])
+    assert [frame.seq for frame, _ in events if frame] == [211]
+    assert sum(discarded for _, discarded in events) == 10
+    assert not stream._buf
+
+
 @pytest.mark.parametrize("split", range(13))
 def test_fragmented_all_boundaries(split):
     stream = p.FrameStream()

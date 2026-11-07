@@ -170,7 +170,7 @@ def encode_error(seq: int, err_code: int, i2c_addr: int = 0, reg_addr: int = 0) 
 
 
 def decode_frame(data: bytes) -> Optional[Frame]:
-    """Return None for invalid length, sync, type, checksum or status version."""
+    """Reject invalid framing, checksum, status version or ERROR padding."""
     if (len(data) != FRAME_SIZE or data[0] != SYNC
             or data[1] not in (TYPE_DATA, TYPE_STATUS, TYPE_ERROR)
             or crc8(data[2:11]) != data[11]):
@@ -187,6 +187,8 @@ def decode_frame(data: bytes) -> Optional[Frame]:
                      range_code=flags & FLAG_RANGE_MASK, sensitivity=sensitivity,
                      sample_rate_hz=rate * (10 if flags & FLAG_RATE_X10 else 1),
                      err_count=err, conv_status=conv, device_status=device)
+    if any(data[6:11]):
+        return None
     code, addr, reg = data[3:6]
     return Frame("error", seq, err_code=code, err_name=ERR_NAMES.get(code, "UNKNOWN"),
                  i2c_addr=addr, reg_addr=reg)

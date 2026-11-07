@@ -29,6 +29,11 @@ class Serial:
         self.clock, self.chunks, self.fail = clock, list(chunks), fail
         self.closed = False
         self.timeout = 0.1
+        self.flush_count = 0
+
+    def reset_input_buffer(self):
+        self.flush_count += 1
+        self.clock.now += 0.025
 
     def read(self, size):
         self.clock.now += 0.1
@@ -149,3 +154,152 @@ def test_import_from_unrelated_working_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     c = load_capture()
     assert Path(c.protocol.__file__).resolve() == SCRIPT.parents[2] / "host/tmag_viewer/protocol.py"
+
+
+@pytest.mark.parametrize("flush", [False, True])
+def test_raw_preserves_original_reads_noise_rejects_and_tail(tmp_path, flush):
+    p = load_capture().protocol
+    good = p.encode_status(10, 0, 0, 100, 500, 0, 1, 2)
+    bad = bytes.fromhex("aaee6b07341c00000000aaee")
+    tail = p.encode_data(11, 1, 2, 3, 4)[:7]
+    wire = b"noise" + bad + good + tail
+    raw = tmp_path / "wire.bin"
+    args = ["--raw-out", str(raw)] + (["--flush-input"] if flush else [])
+    code, out, port = run([wire[:8], wire[8:25], wire[25:]], tmp_path, *args)
+    assert code == 0 and port.closed
+    assert raw.read_bytes() == wire
+    assert out["raw_bytes"] == len(wire) and out["raw_complete"] is True
+    assert Path(out["raw_path"]) == raw
+    assert out["flush_input"] is flush and port.flush_count == int(flush)
+    assert out["flush_duration_seconds"] == pytest.approx(0.025 if flush else 0)
+    assert bool(out["flush_started_utc"]) is flush
+    assert out["valid_frames"] == 1
+    for record in out["records"]:
+        end = record["raw_end_offset"]
+        assert wire[end-12:end].hex() == record["raw_hex"]
+    assert out["records"][0]["raw_end_offset"] == 29
+
+
+def test_raw_existing_file_preserved_without_opening_port(tmp_path):
+    target = tmp_path / "wire.bin"
+    target.write_bytes(b"previous")
+    code, out, port = run([], tmp_path, "--raw-out", str(target))
+    assert code != 0 and out["failure"]
+    assert target.read_bytes() == b"previous"
+    assert out["raw_complete"] is False and out["raw_bytes"] == 0
+    assert not port.closed  # The unopened fake port was never acquired.
+
+
+def test_raw_and_json_must_be_distinct_before_open(tmp_path):
+    c = load_capture()
+    def unexpected(**kwargs):
+        pytest.fail("must reject paths before opening serial")
+    target = tmp_path / "same"
+    with pytest.raises(SystemExit):
+        c.main(["--raw-out", str(target), "--json-out", str(target)],
+               serial_factory=unexpected)
+    assert not target.exists()
+
+
+def test_raw_read_failure_marks_incomplete_and_closes(tmp_path):
+    raw = tmp_path / "wire.bin"
+    code, out, port = run([], tmp_path, "--raw-out", str(raw), fail=True)
+    assert code != 0 and port.closed and "disconnected" in out["failure"]
+    assert raw.read_bytes() == b"" and out["raw_complete"] is False
+
+
+def test_raw_json_samefile_alias_preserves_existing_evidence(tmp_path, monkeypatch):
+    c = load_capture()
+    raw, summary = tmp_path / "wire.bin", tmp_path / "summary.json"
+    raw.write_bytes(b"previous")
+    summary.write_bytes(b"previous")
+    monkeypatch.setattr(c.os.path, "samefile", lambda first, second: True)
+    with pytest.raises(SystemExit):
+        c.main(["--raw-out", str(raw), "--json-out", str(summary)],
+               serial_factory=lambda **kw: pytest.fail("must not open port"))
+    assert raw.read_bytes() == summary.read_bytes() == b"previous"
+
+
+def test_raw_write_failure_closes_and_retains_partial_metadata(tmp_path, monkeypatch):
+    c = load_capture()
+    clock = Clock()
+    port = Serial(clock, [b"noise"])
+    class FailingRaw:
+        closed = False
+        def write(self, chunk):
+            raise OSError("disk full")
+        def close(self):
+            self.closed = True
+    raw = FailingRaw()
+    monkeypatch.setattr(c, "open_raw", lambda path: raw)
+    summary = tmp_path / "summary.json"
+    code = c.main(["--seconds", "1", "--raw-out", str(tmp_path / "wire.bin"),
+                   "--json-out", str(summary)], serial_factory=lambda **kw: port, clock=clock)
+    out = json.loads(summary.read_text(encoding="utf-8"))
+    assert code != 0 and port.closed and raw.closed
+    assert "disk full" in out["failure"]
+    assert out["raw_complete"] is False and out["raw_bytes"] == 0
+    assert out["read_bytes"] == 5 and out["valid_frames"] == 0
+
+
+def test_raw_short_write_then_failure_keeps_exact_partial_prefix(tmp_path, monkeypatch):
+    c = load_capture()
+    clock = Clock()
+    port = Serial(clock, [b"noise"])
+    target = tmp_path / "wire.bin"
+    backing = c.open_raw(target)
+    class PartialRaw:
+        calls = 0
+        def write(self, chunk):
+            self.calls += 1
+            if self.calls == 1:
+                return backing.write(chunk[:2])
+            raise OSError("disk full")
+        def close(self):
+            backing.close()
+    monkeypatch.setattr(c, "open_raw", lambda path: PartialRaw())
+    summary = tmp_path / "summary.json"
+    assert c.main(["--raw-out", str(target), "--json-out", str(summary)],
+                  serial_factory=lambda **kw: port, clock=clock) == 1
+    out = json.loads(summary.read_text(encoding="utf-8"))
+    assert port.closed and backing.closed
+    assert target.read_bytes() == b"no"
+    assert out["raw_bytes"] == 2 and out["read_bytes"] == 5
+    assert out["raw_complete"] is False and out["valid_frames"] == 0
+
+
+def test_raw_fsync_failure_closes_and_marks_incomplete(tmp_path, monkeypatch):
+    c = load_capture()
+    clock = Clock()
+    frame = c.protocol.encode_error(1, 0)
+    port = Serial(clock, [frame])
+    def refuse(fd):
+        raise OSError("fsync failed")
+    monkeypatch.setattr(c.os, "fsync", refuse)
+    target, summary = tmp_path / "wire.bin", tmp_path / "summary.json"
+    assert c.main(["--seconds", "1", "--no-require-status", "--raw-out", str(target),
+                   "--json-out", str(summary)],
+                  serial_factory=lambda **kw: port, clock=clock) == 1
+    out = json.loads(summary.read_text(encoding="utf-8"))
+    assert port.closed and target.read_bytes() == frame
+    assert out["raw_bytes"] == len(frame) and out["raw_complete"] is False
+    assert "fsync failed" in out["failure"]
+
+
+def test_flush_failure_closes_outputs_and_does_not_read(tmp_path):
+    c = load_capture()
+    clock = Clock()
+    port = Serial(clock, [b"never read"])
+    def refuse():
+        port.flush_count += 1
+        clock.now += 0.03
+        raise OSError("flush failed")
+    port.reset_input_buffer = refuse
+    target, summary = tmp_path / "wire.bin", tmp_path / "summary.json"
+    assert c.main(["--flush-input", "--raw-out", str(target), "--json-out", str(summary)],
+                  serial_factory=lambda **kw: port, clock=clock) == 1
+    out = json.loads(summary.read_text(encoding="utf-8"))
+    assert port.closed and port.flush_count == 1 and port.chunks == [b"never read"]
+    assert out["raw_complete"] is False and out["read_bytes"] == 0
+    assert out["flush_duration_seconds"] == pytest.approx(0.03)
+    assert "flush failed" in out["failure"]
