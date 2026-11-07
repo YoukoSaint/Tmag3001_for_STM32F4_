@@ -1,81 +1,19 @@
 cmake_minimum_required(VERSION 3.22)
-
-#
-# This file is generated only once,
-# and is not re-generated if converter is called multiple times.
-#
-# User is free to modify the file as much as necessary
-#
-
-# Setup compiler settings
+project(TMA3001_ LANGUAGES C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
-
-
-# Define the build type
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug")
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build configuration" FORCE)
 endif()
-
-# Set the project name
-set(CMAKE_PROJECT_NAME TMA3001_)
-
-# Enable compile command to ease indexing with e.g. clangd
-set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
-
-# Core project settings
-project(${CMAKE_PROJECT_NAME})
-message("Build type: " ${CMAKE_BUILD_TYPE})
-
-# Enable CMake support for ASM and C languages
-enable_language(C ASM)
-
-# Create an executable object type
-add_executable(${CMAKE_PROJECT_NAME})
-
-# Add STM32CubeMX generated sources
-add_subdirectory(cmake/stm32cubemx)
-
-# Link directories setup
-target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined library search paths
-)
-
-# Add sources to executable
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
-        ./Drivers/Tmag3001/tmag3001_driver.c
-        ./Drivers/ST7789/st7789.c
-        ./Drivers/ST7789/fonts.c
-)
-
-# Add include paths
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
-        ./Drivers/Tmag3001
-        ./Drivers/ST7789
-
-)
-
-# Add project symbols (macros)
-target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
-)
-
-# Remove wrong libob.a library dependency when using cpp files
-list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
-
-# Add linked libraries
-target_link_libraries(${CMAKE_PROJECT_NAME}
-    stm32cubemx
-
-    # Add user defined libraries
-    m
-)
-
-# Enable float printf/scanf in newlib-nano (required for %f %lf etc.)
-# NOTE: each -u must be its own flag; some CMake/Ninja versions collapse
-# consecutive options into one, so we put them in the linker flag string
-# directly to be safe.
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -u _printf_float -u _scanf_float")
+include(cmake/firmware_sources.cmake)
+add_executable(${PROJECT_NAME} ${FIRMWARE_SOURCES})
+target_include_directories(${PROJECT_NAME} PRIVATE ${FIRMWARE_INCLUDE_DIRS})
+target_compile_definitions(${PROJECT_NAME} PRIVATE USE_HAL_DRIVER STM32F411xE $<$<CONFIG:Debug>:DEBUG>)
+target_link_options(${PROJECT_NAME} PRIVATE
+    "-T${CMAKE_CURRENT_SOURCE_DIR}/STM32F411XX_FLASH.ld"
+    --specs=nano.specs "-Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.map"
+    -Wl,--gc-sections -Wl,--print-memory-usage -Wl,-u,_printf_float -Wl,-u,_scanf_float)
+set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/STM32F411XX_FLASH.ld")
+target_link_libraries(${PROJECT_NAME} PRIVATE m nosys)
